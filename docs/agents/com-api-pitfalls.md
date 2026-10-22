@@ -765,6 +765,103 @@ ordering rather than a product bug in `add_fillet` itself.
 
 ---
 
+## 24. `IEntity.Select4` needs a real `SelectData` — `None` is a type mismatch
+
+**Symptom:** `edge.Select4(False, None)` raises `(-2147352571, 'Type mismatch.', None, 2)`
+and nothing is selected.
+
+**Root cause:** the second parameter is an `ISelectData` dispatch. Python `None`
+marshals as `VT_NULL`, which SolidWorks rejects — the same family as pitfall #1
+(`SelectByID2`'s `Callout`).
+
+**Fix:** create one from the selection manager and reuse it for every entity:
+
+```python
+sel_mgr = model.SelectionManager            # flag CreateSelectData / GetSelectedObjectCount2
+data = sel_mgr.CreateSelectData()
+model.ClearSelection2(True)                 # unless appending
+for edge in face.GetEdges():                # flag Select4 on each edge
+    edge.Select4(True, data)                # True = append to the set being built
+```
+
+Also note, from the same investigation: every `IBody2`/`IFace2`/`IEdge`/`ICurve`
+dispatch must be method-flagged (pitfall #5) — unflagged, `GetEdges`/`GetArea`/
+`IsPlane` return their *value* (`'tuple' object is not callable`) and `GetSurface`
+is `Member not found`. `IFace2.Normal` is a property and is `[0, 0, 0]` for
+non-planar faces; a full-circle edge (hole rim) has no start/end vertex, so describe it
+with `ICurve.CircleParams` (`[cx, cy, cz, ax, ay, az, radius]`, metres).
+
+Found 2026-10-13 building `select_face_edges` (#106).
+
+---
+
+## 25. Array/bool out-parameters (`GetWhatsWrong`, `GetErrorCode2`) need byref VARIANTs
+
+**Symptom:** `ext.GetWhatsWrong()` and `feature.GetErrorCode2()` raise
+`'Parameter not optional.'`; passing `pythoncom.Missing` raises
+`Objects of type 'PyOleMissing' can not be converted to a COM VARIANT`.
+
+**Fix:** pass byref VARIANTs and read `.value` afterwards (works under forced late
+binding — no early-bound wrapper needed, and `makepy` cannot auto-generate one for these
+objects anyway):
+
+```python
+from win32com.client import VARIANT
+import pythoncom
+
+feats, codes, warns = (VARIANT(pythoncom.VT_BYREF | pythoncom.VT_VARIANT, None) for _ in range(3))
+ext.GetWhatsWrong(feats, codes, warns)        # feats.value: tuple of IFeature, codes.value: swFeatureError_e
+is_warning = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_BOOL, False)
+code = feature.GetErrorCode2(is_warning)      # is_warning.value: bool
+```
+
+`_byref_variant()` / `_byref_bool()` in `solidworks/io.py` build these (with a
+non-pywin32 fallback). `swFeatureError_e` values are generated from `swconst.tlb` by
+`scripts/gen_sw_feature_errors.py` — never hand-type them (see #60).
+
+**Gotchas observed:** an extrude whose sketch was emptied reports code `1`
+(`swFeatureErrorUnknown`), so the code alone is often unhelpful — `rebuild_model` falls
+back to the feature type and checks parent sketches for zero segments. And setting a
+fillet's radius dimension to an impossible value (30 / 200 mm on a 10 mm block) via
+`SetSystemValue3` + `EditRebuild3` produced **no** reported rebuild error at all.
+
+Found 2026-10-13 building `rebuild_model` diagnostics (#106).
+
+---
+
+## 26. SolidWorks 2026 SP04 (3DEXPERIENCE) crashes in its idle-time CommandManager refresh
+
+- **Signature:** SolidWorks dies during or right after an ordinary call
+  (`CreateLine`, `CloseDoc`, ...); the client gets RPC `0x800706BE`. The
+  journal (`%APPDATA%\SolidWorks\SOLIDWORKS 2026\swxJRNL.BAK` after a
+  restart) ends with a stack trace in SolidWorks' own idle loop:
+  `CAmApp::OnIdle` -> `swCMBar::SetAnalysisPreparationTabVisibility` ->
+  `uiBlockMan_c::isPartialModify` -> `uiModelDoc_c::conditionalBlockCmd`.
+  Windows Error Reporting records nothing.
+- **Not our code:** `main` crashes identically, and a COM trace showed the
+  feature branch sending byte-identical calls. Not a leak (memory/GDI flat).
+- **When:** nearly every crash landed 2-5 minutes after SolidWorks launched,
+  while 3DEXPERIENCE finishes signing in and re-lays-out its role-based
+  CommandManager tabs, combined with back-to-back API calls.
+- **What works (2026-10-20):** the full live regression file ran clean on a
+  warmed-up session at 1 s per call, 2.5 s per document open/create/close and
+  8 s between tests. `_handle_com_operation` now pauses after every operation
+  (`SOLIDWORKS_MCP_COM_SETTLE_SECONDS`, default 0.25;
+  `SOLIDWORKS_MCP_DOC_SETTLE_SECONDS`, default 1.0). The live suite applies the
+  slower values and waits until SolidWorks is `SW_TEST_WARMUP_SECONDS` (480)
+  old before its first test.
+- **Did not help:** `ISldWorks.CommandInProgress` (crashed sooner),
+  `SketchManager.AddToDB`, leaving sketch-edit mode before `CloseDoc`,
+  unloading the 3DEXPERIENCE add-ins, resetting SolidWorks settings, hidden
+  background mode (`DocumentVisible(False)` stops sketch creation entirely),
+  and restarting SolidWorks every N documents (the 3DEXPERIENCE edition will
+  not relaunch from `sldworks.exe` directly).
+- **Harness rule:** after a crash, `connect()` would COM-launch a bare
+  `SLDWORKS.exe -Embedding` per test and crash it again. The live fixtures now
+  stop the run when SolidWorks is not running. Use `-x` for live runs.
+
+---
+
 ## Adapter wiring traps — not COM, same silent-failure shape
 
 These are not SolidWorks issues, but they fail the same way: the code imports, the tests
@@ -882,5 +979,5 @@ Found 2026-09-05 wiring `execute_macro` end-to-end against live SW 2026 (issue #
 | Is a name a method or property? | In gen_py class: `def Name(...)` = method; `"Name": (...)` in `_prop_map_get_` = property |
 | What DISPID does a method have? | `InvokeTypes(DISPID, ...)` line in the gen_py method body |
 | Does a method return IFeature? | Check return type: `(9, 0)` = VT_DISPATCH (object); `(24, 0)` = VT_I4 (integer) |
-| Full COM threading rules | See "COM threading architecture" in [CLAUDE.md](../../CLAUDE.md) |
-| Runbook for live debugging | See "Troubleshooting Runbook" section in [CLAUDE.md](../../CLAUDE.md) |
+| Full COM threading rules | See "COM threading architecture" in [CLAUDE.md](https://github.com/andrewbartels1/SolidworksMCP-python/blob/main/CLAUDE.md) |
+| Runbook for live debugging | See "Troubleshooting Runbook" section in [CLAUDE.md](https://github.com/andrewbartels1/SolidworksMCP-python/blob/main/CLAUDE.md) |

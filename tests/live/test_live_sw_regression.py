@@ -41,6 +41,7 @@ import pytest
 # base.py is pure-pydantic (no pywin32), so importing the parameter models at
 # module scope is safe on non-Windows CI even though the SW tests are skipped.
 from solidworks_mcp.adapters.base import LoftParameters, SweepParameters
+from tests.live.evidence import evidence
 
 # Tests that need a real .SLDASM file to exercise OpenDoc6 read the path
 # from this env var. Set it to any local SolidWorks assembly; tests skip
@@ -256,34 +257,23 @@ async def test_get_model_info_fields_populate(connected_adapter) -> None:
     assert isinstance(info["needs_rebuild"], bool)
 
 
-async def test_get_model_info_works_from_worker_thread(
-    connected_adapter,
-) -> None:
-    """Calling from a worker thread doesn't hit the cross-thread
-    AttributeError.
+async def test_com_calls_stay_on_the_connect_thread(connected_adapter) -> None:
+    """A call from another thread is refused cleanly; the owner keeps working.
 
-    Regression: before the ComExecutor refactor, this exact call path
-    raised ``AttributeError: SldWorks.Application.<method>`` because the
-    cached IDispatch was bound to the connect-thread's apartment.
+    SolidWorks COM objects are STA-bound to the thread that ran ``connect()``
+    (CLAUDE.md "COM threading architecture", invariant 1). Used from another
+    thread they fail with a cryptic late-binding ``AttributeError`` (runbook
+    #5); the adapter must refuse before touching COM, and the session must
+    stay usable from its own thread afterwards.
     """
-    test_assy = _test_assembly_path()
-    if not test_assy or not os.path.exists(test_assy):
-        pytest.skip(
-            f"set {_TEST_ASSEMBLY_ENV_VAR} to a local .SLDASM path to run this test"
-        )
-
-    await connected_adapter.open_model(test_assy)
-
     worker_result: dict[str, object] = {}
 
     def worker() -> None:
         loop = asyncio.new_event_loop()
         try:
-            r = loop.run_until_complete(connected_adapter.get_model_info())
-            worker_result["status"] = r.status
-            worker_result["error"] = r.error
-            if r.is_success:
-                worker_result["title"] = r.data["title"]
+            worker_result["result"] = loop.run_until_complete(
+                connected_adapter.list_open_documents()
+            )
         finally:
             loop.close()
 
@@ -292,10 +282,15 @@ async def test_get_model_info_works_from_worker_thread(
     t.join(timeout=30)
     assert not t.is_alive(), "worker thread hung"
 
-    assert worker_result["error"] is None, (
-        f"cross-thread get_model_info surfaced an error: {worker_result['error']!r}"
-    )
-    assert worker_result.get("title", "").endswith(".SLDASM")
+    refused = worker_result["result"]
+    evidence("call from a worker thread", refused)
+    assert refused.is_error
+    assert "'pytest-worker'" in refused.error
+    assert "belong to the thread that called connect()" in refused.error
+
+    still_works = await connected_adapter.list_open_documents()
+    evidence("same call from the connect thread", still_works)
+    assert still_works.is_success, still_works.error
 
 
 # ---- add_sketch_constraint live regression ----
@@ -1786,6 +1781,10 @@ async def test_exit_sketch_clears_leftover_sw_sketch_live(
             return adapter.currentModel.GetActiveSketch2()
 
         pre = adapter._handle_com_operation("probe_pre_exit", _probe_sw_state)
+        evidence(
+            "SW sketch still open, adapter forgot it",
+            {"sw_active_sketch": pre.data is not None, "adapter_sketch": None},
+        )
         assert pre.is_success and pre.data is not None, (
             f"staging failed: SW reports no active sketch ({pre.data!r}); "
             f"err={pre.error}"
@@ -1794,6 +1793,7 @@ async def test_exit_sketch_clears_leftover_sw_sketch_live(
         # --- The actual test: exit_sketch must toggle SW out of the
         #     leftover sketch despite adapter-side state being empty.
         exit_result = await adapter.exit_sketch()
+        evidence("exit_sketch", exit_result)
         assert exit_result.is_success, (
             f"exit_sketch should succeed on SW-side leftover sketch, got "
             f"status={exit_result.status} err={exit_result.error}"
@@ -1801,6 +1801,7 @@ async def test_exit_sketch_clears_leftover_sw_sketch_live(
 
         # Verify SW reports no active sketch afterwards.
         post = adapter._handle_com_operation("probe_post_exit", _probe_sw_state)
+        evidence("SW active sketch after exit", post.data)
         assert post.is_success and post.data is None, (
             f"SW still reports an active sketch after exit_sketch: "
             f"data={post.data!r} err={post.error}"
@@ -1809,6 +1810,7 @@ async def test_exit_sketch_clears_leftover_sw_sketch_live(
         # Final proof: a fresh create_sketch must succeed now, which is
         # exactly the user-visible symptom this bug surfaced as.
         follow_up = await adapter.create_sketch("Front")
+        evidence("new create_sketch('Front') afterwards", follow_up.status)
         assert follow_up.is_success, (
             f"create_sketch after exit_sketch failed: {follow_up.error}"
         )
@@ -2107,7 +2109,7 @@ async def test_list_features_assembly_resolves_real_components_and_subassembly(
        every component silently became ``UnresolvedComponent``.
 
     Both bugs passed every mock-adapter unit test in
-    ``tests/solidworks_mcp/adapters/test_list_features_assembly.py`` —
+    ``tests/solidworks_mcp/adapters/solidworks/test_selection_assembly_features.py`` —
     the traversal logic itself was correct — and only surfaced against a
     real, unflagged COM dispatch. This is the only test in the suite that
     would catch either regression coming back. See

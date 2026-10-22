@@ -19,7 +19,7 @@ try:
     import pythoncom
     import win32com.client
     import win32com.client.dynamic as _dynamic
-except ImportError:  # pragma: no cover
+except ImportError:
     pythoncom = SimpleNamespace()
     win32com = SimpleNamespace(client=SimpleNamespace())
     _dynamic = SimpleNamespace(Dispatch=lambda *_a, **_kw: None)
@@ -29,7 +29,7 @@ try:
     import comtypes.client as _comtypes_client  # type: ignore[import-untyped]
 
     _COMTYPES_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _COMTYPES_AVAILABLE = False
 
 # SolidWorks type library GUID (stable across SW versions)
@@ -49,7 +49,7 @@ def _get_sw_comtypes_lib() -> Any:
         return _sw_comtypes_lib
     if not _COMTYPES_AVAILABLE:
         return None
-    for major in (35, 34, 33, 32, 31, 30):  # pragma: no cover
+    for major in (35, 34, 33, 32, 31, 30):
         try:
             _sw_comtypes_lib = _comtypes_client.GetModule(
                 (comtypes.GUID(_SW_TLB_GUID), major, 0)
@@ -57,10 +57,10 @@ def _get_sw_comtypes_lib() -> Any:
             return _sw_comtypes_lib
         except Exception:
             continue
-    return None  # pragma: no cover
+    return None
 
 
-def _bridge_com_to_comtypes(pywin32_obj: Any, iface: Any) -> Any:  # pragma: no cover
+def _bridge_com_to_comtypes(pywin32_obj: Any, iface: Any) -> Any:
     """Bridge a pywin32 CDispatch/COM object to a comtypes interface pointer.
 
     Extracts the raw IUnknown pointer from pywin32's repr string, then
@@ -93,6 +93,12 @@ _MATE_ALIGNMENTS: dict[str, int] = {
     "anti_aligned": 1,
     "closest": 2,
 }
+
+
+#: ``swDwgTemplates_e`` / ``swDwgPaperSizes_e`` values (read from swconst.tlb).
+_SW_DWG_TEMPLATE_NONE = 13
+_SW_DWG_PAPER_A_SIZE = 0
+_SW_DWG_PAPERS_USER_DEFINED = 12
 
 
 #: SolidWorks named views. The leading asterisk is part of the name and
@@ -282,6 +288,43 @@ def _byref_int() -> Any:
         return _ByrefFallback(0)
     return variant_ctor(
         int(getattr(pythoncom, "VT_BYREF", 0)) | int(getattr(pythoncom, "VT_I4", 0)), 0
+    )
+
+
+def _byref_variant() -> Any:
+    """Return a byref VARIANT for an array/variant out-parameter.
+
+    ``IModelDocExtension::GetWhatsWrong`` fills three of these (features,
+    error codes, warning flags); confirmed live on R2026x that late binding
+    accepts ``VARIANT(VT_BYREF | VT_VARIANT, None)`` and exposes the result on
+    ``.value``. ``pythoncom.Missing`` is rejected ("can not be converted to a
+    COM VARIANT").
+
+    Returns:
+        Any: The byref VARIANT, or a ``_ByrefFallback(None)`` without pywin32.
+    """
+    variant_ctor = getattr(getattr(win32com, "client", None), "VARIANT", None)
+    if not callable(variant_ctor):
+        return _ByrefFallback(None)
+    return variant_ctor(
+        int(getattr(pythoncom, "VT_BYREF", 0))
+        | int(getattr(pythoncom, "VT_VARIANT", 0)),
+        None,
+    )
+
+
+def _byref_bool() -> Any:
+    """Return a byref bool VARIANT (e.g. ``IFeature::GetErrorCode2(IsWarning)``).
+
+    Returns:
+        Any: The byref VARIANT, or a ``_ByrefFallback(False)`` without pywin32.
+    """
+    variant_ctor = getattr(getattr(win32com, "client", None), "VARIANT", None)
+    if not callable(variant_ctor):
+        return _ByrefFallback(False)
+    return variant_ctor(
+        int(getattr(pythoncom, "VT_BYREF", 0)) | int(getattr(pythoncom, "VT_BOOL", 0)),
+        False,
     )
 
 
@@ -1200,14 +1243,29 @@ class SolidWorksIOMixin:
             # SW 2025: 8=Part.prtdot, 9=Assembly.asmdot, 10=Drawing.drwdot,
             # 0-3 all empty.
             drw_template = self._resolve_template_path([10, 1, 0, 2, 3], ".drwdot")
-            if not drw_template:
-                raise Exception("No drawing template configured in SolidWorks")
-
-            model = app.NewDocument(drw_template, 12, 0.2794, 0.2159)
+            model = None
+            if drw_template:
+                model = app.NewDocument(
+                    drw_template, _SW_DWG_PAPERS_USER_DEFINED, 0.2794, 0.2159
+                )
             if not model:
+                # No usable template (a settings reset blanks the slot, or it
+                # names a deleted file). Like create_part's NewPart fallback,
+                # let SolidWorks make a blank A-size drawing with no sheet
+                # format; views can still be placed on it.
+                model = adapter._attempt(
+                    lambda: app.NewDrawing2(
+                        _SW_DWG_TEMPLATE_NONE, "", _SW_DWG_PAPER_A_SIZE, 0.2794, 0.2159
+                    )
+                )
+            if not model:
+                if drw_template:
+                    tried = f"template {drw_template!r}"
+                else:
+                    tried = "no drawing template is configured"
                 raise Exception(
-                    f"Failed to create new drawing from template "
-                    f"'{drw_template}'"
+                    f"Failed to create a drawing: {tried}, and a blank drawing "
+                    "without a template (NewDrawing2) also failed"
                 )
 
             adapter._attempt(lambda: _sw_type_info.flag_doc(model, 3), default=0)
@@ -1242,7 +1300,7 @@ class SolidWorksIOMixin:
                 status=AdapterResultStatus.ERROR, error="No active model"
             )
 
-        def _get() -> float:  # pragma: no cover
+        def _get() -> float:
             """Get the dimension value."""
             dimension = adapter.currentModel.Parameter(name)
             if not dimension:
@@ -1452,28 +1510,69 @@ class SolidWorksIOMixin:
             adapter._handle_com_operation("save_file", _save),
         )
 
-    async def rebuild_model(self) -> AdapterResult[None]:
-        """Force a model rebuild.
+    async def rebuild_model(
+        self, top_level_only: bool = False
+    ) -> AdapterResult[dict[str, Any]]:
+        """Force a rebuild and report exactly which features fail and why.
+
+        Args:
+            top_level_only: Rebuild only the top level of an assembly.
+                Defaults to False (full rebuild).
 
         Returns:
-            AdapterResult[None]: Result of the rebuild operation.
+            AdapterResult[dict[str, Any]]: ``rebuilt``, ``top_level_only``,
+            ``errors`` (see ``rebuild_diagnostics.explain``), ``error_count``,
+            ``warning_count`` and a one-line ``summary``. ERROR - still
+            carrying that ``data`` - when any error-severity entry remains or
+            SolidWorks reports the rebuild itself failed.
         """
+        from .com_utils import strip_op_prefix
+        from .rebuild_diagnostics import explain, summarize
+        from .rebuild_inspector import collect_rebuild_issues
+
         adapter = self._adapter(self)
         if not adapter.currentModel:
             return AdapterResult(
                 status=AdapterResultStatus.ERROR, error="No active model"
             )
 
-        def _rebuild() -> None:
-            """Rebuild the model."""
-            success = adapter.currentModel.ForceRebuild3(False)
-            if not success:
-                raise Exception("Failed to rebuild model")
+        def _rebuild() -> dict[str, Any]:
+            model = adapter.currentModel
+            # ForceRebuild3 returns False whenever a feature fails to rebuild
+            # (confirmed live 2026-10-13), so False is not "the rebuild call
+            # broke" - collect the per-feature issues either way and only fall
+            # back to a generic failure when SolidWorks names none.
+            rebuilt = bool(model.ForceRebuild3(top_level_only))
+            entries = [explain(i) for i in collect_rebuild_issues(adapter, model)]
+            error_count, warning_count, summary = summarize(entries)
+            if not rebuilt and not error_count:
+                # Keep any warnings in data; only the cause is unnamed.
+                summary = (
+                    "SolidWorks reported that the rebuild failed (ForceRebuild3 "
+                    "returned False) but listed no failing feature."
+                    + (f" Warnings: {summary}" if warning_count else "")
+                )
+            return {
+                "rebuilt": rebuilt,
+                "top_level_only": top_level_only,
+                "errors": entries,
+                "error_count": error_count,
+                "warning_count": warning_count,
+                "summary": summary,
+            }
 
-        return cast(
-            AdapterResult[None],
+        result = cast(
+            "AdapterResult[dict[str, Any]]",
             adapter._handle_com_operation("rebuild_model", _rebuild),
         )
+        if not result.is_success:
+            result.error = strip_op_prefix(result.error, "rebuild_model")
+        elif result.data and (
+            result.data["error_count"] or not result.data["rebuilt"]
+        ):
+            result.status = AdapterResultStatus.ERROR
+            result.error = result.data["summary"]
+        return result
 
     async def get_model_info(self) -> AdapterResult[dict[str, Any]]:
         """Collect summary metadata about the active model.
@@ -1559,8 +1658,6 @@ class SolidWorksIOMixin:
 
         def _list() -> list[dict[str, Any]]:
             app = adapter.swApp
-            if app is None:
-                raise Exception("SolidWorks application is not connected")
 
             docs = _coerce_dispatch_sequence(
                 adapter._attempt(lambda: app.GetDocuments(), default=None)
@@ -1627,8 +1724,6 @@ class SolidWorksIOMixin:
 
         def _activate() -> dict[str, Any]:
             app = adapter.swApp
-            if app is None:
-                raise Exception("SolidWorks application is not connected")
 
             docs = _coerce_dispatch_sequence(
                 adapter._attempt(lambda: app.GetDocuments(), default=None)
@@ -1851,7 +1946,7 @@ class SolidWorksIOMixin:
             adapter._handle_com_operation("get_mass_properties", _get),
         )
 
-    async def pack_and_go_assembly(  # pragma: no cover
+    async def pack_and_go_assembly(
         self,
         source_path: str,
         target_dir: str,
@@ -1879,7 +1974,7 @@ class SolidWorksIOMixin:
         source = Path(source_path)
         out_dir = Path(target_dir)
 
-        def _do_pack_and_go() -> dict[str, Any]:  # pragma: no cover
+        def _do_pack_and_go() -> dict[str, Any]:
             # Load comtypes TLB (cached after first call)
             sw_lib = _get_sw_comtypes_lib()
             if sw_lib is None:
@@ -1906,16 +2001,11 @@ class SolidWorksIOMixin:
             out_dir.mkdir(parents=True, exist_ok=True)
 
             # Open the source assembly
-            vt = pythoncom.VT_BYREF | pythoncom.VT_I4
-            from win32com.client import VARIANT  # noqa: PLC0415
-
-            err = VARIANT(vt, 0)
-            warn = VARIANT(vt, 0)
+            err, warn = _byref_int(), _byref_int()
             model = adapter.swApp.OpenDoc6(str(source), 2, 1, "", err, warn)
             if model is None and err.value == 65536:
                 adapter.swApp.CloseAllDocuments(False)
-                err = VARIANT(vt, 0)
-                warn = VARIANT(vt, 0)
+                err, warn = _byref_int(), _byref_int()
                 model = adapter.swApp.OpenDoc6(str(source), 2, 1, "", err, warn)
             if model is None:
                 raise RuntimeError(f"OpenDoc6 failed err={err.value} warn={warn.value}")

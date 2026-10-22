@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from solidworks_mcp.ui import server
@@ -609,3 +611,36 @@ def test_configure_ui_file_logging_first_call_creates_sink() -> None:
     finally:
         # Clean up - the sink was already created by module import so just restore
         server._UI_FILE_SINK_ID = original_sink_id
+
+
+@pytest.mark.asyncio
+async def test_startup_ingest_skips_an_empty_knowledge_folder(monkeypatch) -> None:
+    """No markdown files in design_knowledge -> nothing is indexed."""
+    from solidworks_mcp.ui import server as ui_server
+
+    monkeypatch.setattr(ui_server.FilePath, "glob", lambda self, _pattern: iter(()))
+
+    def _no_index(*_a, **_kw):
+        raise AssertionError("the RAG index must not be built")
+
+    monkeypatch.setattr("solidworks_mcp.agents.vector_rag.VectorRAGIndex", _no_index)
+
+    assert await ui_server._startup_ingest_design_knowledge() is None
+
+
+def test_startup_ingest_returns_early_when_no_md_files(monkeypatch, tmp_path):
+    """_startup_ingest_design_knowledge should return early when directory has no md files. Covers line 180."""
+    from solidworks_mcp.ui import server
+
+    empty_dir = tmp_path / "design_knowledge"
+    empty_dir.mkdir()
+
+    mock_dir = MagicMock()
+    mock_dir.is_dir = MagicMock(return_value=True)
+    mock_dir.glob = MagicMock(return_value=[])  # No .md files → line 180
+
+    with patch.object(server, "FilePath") as mock_fpath:
+        mock_instance = MagicMock()
+        mock_instance.parent.parent.__truediv__ = MagicMock(return_value=mock_dir)
+        mock_fpath.return_value = mock_instance
+        server._startup_ingest_design_knowledge()

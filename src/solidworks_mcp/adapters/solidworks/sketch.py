@@ -364,9 +364,7 @@ def _create_sketch_impl(adapter: Any, plane: str) -> AdapterResult[str]:
             adapter.currentSketch = (
                 adapter._attempt(lambda: adapter.currentSketchManager.ActiveSketch)
                 or adapter._attempt(lambda: adapter.currentModel.GetActiveSketch2())
-                or adapter._attempt(
-                    lambda: adapter.swApp.ActiveDoc.GetActiveSketch2()
-                )
+                or adapter._attempt(lambda: adapter.swApp.ActiveDoc.GetActiveSketch2())
             )
 
         adapter._sketch_count += 1
@@ -680,16 +678,16 @@ def _add_spline_impl(
         try:
             import pythoncom as _pythoncom
             from win32com.client import VARIANT as _VARIANT
-        except ImportError:  # pragma: no cover
+        except ImportError:
             _pythoncom = None
             _VARIANT = None
 
         points_arg: Any
         if _pythoncom is not None and _VARIANT is not None:
             points_arg = _VARIANT(_pythoncom.VT_ARRAY | _pythoncom.VT_R8, spline_points)
-        elif sys.platform == "win32":  # pragma: no cover
+        elif sys.platform == "win32":
             raise Exception("pywin32 is required for add_spline on Windows")
-        else:  # pragma: no cover
+        else:
             points_arg = spline_points
 
         spline = adapter.currentSketchManager.CreateSpline2(points_arg, False)
@@ -993,7 +991,7 @@ def _add_sketch_constraint_impl(
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
 
-    def _constraint_operation() -> str:  # pragma: no cover
+    def _constraint_operation() -> str:
         if not adapter.currentModel:
             raise Exception("No active model")
 
@@ -1043,15 +1041,10 @@ def _add_sketch_constraint_impl(
         # Flag IModelDoc2 + ISketch + ISketchRelationManager so late-binding
         # resolves GetActiveSketch2, RelationManager, and AddRelation as
         # methods/properties correctly.
-        try:
-            from .. import sw_type_info as _sw_type_info
-        except ImportError:
-            _sw_type_info = None  # type: ignore[assignment]
-        if _sw_type_info is not None:
-            adapter._attempt(
-                lambda: _sw_type_info.flag_methods(adapter.currentModel, "IModelDoc2"),
-                default=0,
-            )
+        adapter._attempt(
+            lambda: _sw_type_info.flag_methods(adapter.currentModel, "IModelDoc2"),
+            default=0,
+        )
 
         active_sketch = adapter._attempt(
             lambda: adapter.currentModel.GetActiveSketch2(), default=None
@@ -1061,20 +1054,18 @@ def _add_sketch_constraint_impl(
                 "No active sketch on the model — create_sketch first or "
                 "open the existing sketch for edit."
             )
-        if _sw_type_info is not None:
-            adapter._attempt(
-                lambda: _sw_type_info.flag_methods(active_sketch, "ISketch"),
-                default=0,
-            )
+        adapter._attempt(
+            lambda: _sw_type_info.flag_methods(active_sketch, "ISketch"),
+            default=0,
+        )
 
         relmgr = adapter._attempt(lambda: active_sketch.RelationManager, default=None)
         if relmgr is None:
             raise Exception("Active sketch has no RelationManager")
-        if _sw_type_info is not None:
-            adapter._attempt(
-                lambda: _sw_type_info.flag_methods(relmgr, "ISketchRelationManager"),
-                default=0,
-            )
+        adapter._attempt(
+            lambda: _sw_type_info.flag_methods(relmgr, "ISketchRelationManager"),
+            default=0,
+        )
 
         # pywin32 won't auto-marshal a Python list of CDispatch entities to a
         # SAFEARRAY — the VT_ARRAY|VT_DISPATCH variant is the shape SolidWorks
@@ -1192,7 +1183,7 @@ def _add_sketch_dimension_impl(
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
 
-    def _dimension_operation() -> str:  # pragma: no cover
+    def _dimension_operation() -> str:
         """Inner COM closure that resolves entities, places and values the dimension.
 
         Resolves entity objects from the adapter registry, computes the
@@ -1265,7 +1256,7 @@ def _add_sketch_dimension_impl(
 
         text_x, text_y, text_z, direction = placement
 
-        def _try_create_angular_dimension() -> Any:  # pragma: no cover
+        def _try_create_angular_dimension() -> Any:
             """Attempt to create an angular dimension between two line segments.
 
             Finds the shared vertex between ``entity1_obj`` and
@@ -1349,33 +1340,33 @@ def _add_sketch_dimension_impl(
                     default=None,
                 )
 
-            if not display_dim:
-                raise Exception("SolidWorks failed to create sketch dimension")
+        if not display_dim:
+            raise Exception("SolidWorks failed to create sketch dimension")
 
-            if dim_type == "angular":
-                value_si = value * _math_dim.pi / 180.0
-            else:
-                value_si = value / 1000.0
+        if dim_type == "angular":
+            value_si = value * _math_dim.pi / 180.0
+        else:
+            value_si = value / 1000.0
 
-            dim_obj = (
-                adapter._attempt(lambda: display_dim.GetDimension2(0), default=None)
-                or adapter._attempt(lambda: display_dim.GetDimension(), default=None)
-                or display_dim
+        dim_obj = (
+            adapter._attempt(lambda: display_dim.GetDimension2(0), default=None)
+            or adapter._attempt(lambda: display_dim.GetDimension(), default=None)
+            or display_dim
+        )
+        if (
+            adapter._attempt(
+                lambda: dim_obj.SetSystemValue3(value_si, 1, None), default=None
             )
+            is None
+        ):
             if (
                 adapter._attempt(
-                    lambda: dim_obj.SetSystemValue3(value_si, 1, None), default=None
+                    lambda: dim_obj.SetSystemValue2(value_si, 1), default=None
                 )
                 is None
             ):
-                if (
-                    adapter._attempt(
-                        lambda: dim_obj.SetSystemValue2(value_si, 1), default=None
-                    )
-                    is None
-                ):
-                    if hasattr(dim_obj, "SystemValue"):
-                        dim_obj.SystemValue = value_si
+                if hasattr(dim_obj, "SystemValue"):
+                    dim_obj.SystemValue = value_si
 
         return adapter._register_sketch_entity("Dimension", display_dim)  # type: ignore[no-any-return]
 
@@ -1385,9 +1376,7 @@ def _add_sketch_dimension_impl(
     )
 
 
-def _select_sketch_entities(  # pragma: no cover
-    adapter: Any, entity_ids: list[str], mark: int
-) -> None:
+def _select_sketch_entities(adapter: Any, entity_ids: list[str], mark: int) -> None:
     """Select sketch entities from the registry under a specific mark.
 
     Resolves each ID against ``adapter._sketch_entities`` and calls
@@ -1416,17 +1405,11 @@ def _select_sketch_entities(  # pragma: no cover
         Exception: If an entity ID is not in the registry or a Select4
             call returns ``False``.
     """
-    try:
-        from .. import sw_type_info as _sw_type_info
-    except ImportError:
-        _sw_type_info = None  # type: ignore[assignment]
-
     sel_mgr = adapter.currentModel.SelectionManager
-    if _sw_type_info is not None:
-        adapter._attempt(
-            lambda: _sw_type_info.flag_methods(sel_mgr, "ISelectionMgr"),
-            default=0,
-        )
+    adapter._attempt(
+        lambda: _sw_type_info.flag_methods(sel_mgr, "ISelectionMgr"),
+        default=0,
+    )
     select_data = sel_mgr.CreateSelectData()
     select_data.Mark = mark
     for ent_id in entity_ids:
@@ -1447,24 +1430,20 @@ def _select_sketch_entities(  # pragma: no cover
         # original Select4 path.
         if isinstance(entity, (list, tuple)):
             for segment in entity:
-                if _sw_type_info is not None:
-                    adapter._attempt(
-                        lambda s=segment: _sw_type_info.flag_methods(
-                            s, "ISketchSegment"
-                        ),
-                        default=0,
-                    )
+                adapter._attempt(
+                    lambda s=segment: _sw_type_info.flag_methods(s, "ISketchSegment"),
+                    default=0,
+                )
                 ok = segment.Select4(True, select_data)
                 if not ok:
                     raise Exception(
                         f"Failed to select segment of sketch entity '{ent_id}'"
                     )
         else:
-            if _sw_type_info is not None:
-                adapter._attempt(
-                    lambda e=entity: _sw_type_info.flag_methods(e, "ISketchSegment"),
-                    default=0,
-                )
+            adapter._attempt(
+                lambda e=entity: _sw_type_info.flag_methods(e, "ISketchSegment"),
+                default=0,
+            )
             ok = entity.Select4(True, select_data)
             if not ok:
                 raise Exception(f"Failed to select sketch entity '{ent_id}'")
@@ -1524,7 +1503,7 @@ def _sketch_linear_pattern_impl(
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
 
-    def _linear_pattern_operation() -> str:  # pragma: no cover
+    def _linear_pattern_operation() -> str:
         if not entities:
             raise Exception("sketch_linear_pattern requires at least one entity")
         if count < 2:
@@ -1646,7 +1625,7 @@ def _sketch_circular_pattern_impl(
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
 
-    def _circular_pattern_operation() -> str:  # pragma: no cover
+    def _circular_pattern_operation() -> str:
         if not entities:
             raise Exception("sketch_circular_pattern requires at least one entity")
         if count < 2:
@@ -1687,11 +1666,6 @@ def _sketch_circular_pattern_impl(
             # back to placing the axis at angle π from the seed if
             # GetCenterPoint isn't available; that still works when the
             # user positions the seed on the +X side of the origin.
-            try:
-                from .. import sw_type_info as _sw_type_info
-            except ImportError:
-                _sw_type_info = None  # type: ignore[assignment]
-
             first_entity = adapter._sketch_entities.get(entities[0])
 
             seed_xy: tuple[float, float] | None = None
@@ -1720,11 +1694,7 @@ def _sketch_circular_pattern_impl(
                         f"Use a circle, arc, or ellipse seed."
                     )
 
-            if (
-                seed_xy is None
-                and first_entity is not None
-                and _sw_type_info is not None
-            ):
+            if seed_xy is None and first_entity is not None:
                 # GetCenterPoint lives on multiple sketch-entity interfaces
                 # (ISketchArc for arcs/circles, ISketchEllipse for ellipses),
                 # all with the same zero-arg signature. Flag every interface
@@ -1854,7 +1824,7 @@ def _sketch_mirror_impl(
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
 
-    def _mirror_operation() -> str:  # pragma: no cover
+    def _mirror_operation() -> str:
         if not entities:
             raise Exception("sketch_mirror requires at least one entity")
         if not mirror_line:
@@ -1963,7 +1933,7 @@ def _sketch_offset_impl(
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
 
-    def _offset_operation() -> str:  # pragma: no cover
+    def _offset_operation() -> str:
         if not entities:
             raise Exception("sketch_offset requires at least one entity")
         if offset_distance <= 0:
@@ -2067,21 +2037,15 @@ def _exit_sketch_impl(adapter: Any) -> AdapterResult[None]:
             error="No active sketch to exit",
         )
 
-    def _exit_operation() -> str:  # pragma: no cover
-        try:
-            from .. import sw_type_info as _sw_type_info
-        except ImportError:
-            _sw_type_info = None  # type: ignore[assignment]
-
+    def _exit_operation() -> str:
         # ``GetActiveSketch2`` is a real zero-arg method on IModelDoc2.
         # Without flagging, pywin32 late binding resolves it as a property
         # and SW returns ``Member not found`` — the same root cause as
         # the cross-thread bugs in runbook #5.
-        if _sw_type_info is not None:
-            adapter._attempt(
-                lambda: _sw_type_info.flag_methods(adapter.currentModel, "IModelDoc2"),
-                default=0,
-            )
+        adapter._attempt(
+            lambda: _sw_type_info.flag_methods(adapter.currentModel, "IModelDoc2"),
+            default=0,
+        )
 
         sw_active = adapter._attempt(lambda: adapter.currentModel.GetActiveSketch2())
         adapter_active = adapter.currentSketchManager
@@ -2098,11 +2062,10 @@ def _exit_sketch_impl(adapter: Any) -> AdapterResult[None]:
         # apartment-safe); fall back to a fresh ``currentModel.SketchManager``
         # for the SW-only state case.
         sketch_manager = adapter_active or adapter.currentModel.SketchManager
-        if _sw_type_info is not None:
-            adapter._attempt(
-                lambda: _sw_type_info.flag_methods(sketch_manager, "ISketchManager"),
-                default=0,
-            )
+        adapter._attempt(
+            lambda: _sw_type_info.flag_methods(sketch_manager, "ISketchManager"),
+            default=0,
+        )
         sketch_manager.InsertSketch(True)
         adapter.currentSketch = None
         adapter.currentSketchManager = None
@@ -2129,7 +2092,127 @@ def _exit_sketch_impl(adapter: Any) -> AdapterResult[None]:
             AdapterResult[None],
             AdapterResult(status=AdapterResultStatus.SUCCESS, data=None),
         )
-    return cast(AdapterResult[None], result)  # pragma: no cover
+    return cast(AdapterResult[None], result)
+
+
+def _to_bool(value: Any) -> bool | None:
+    """Normalise an arbitrary raw value to a Python bool.
+
+    Handles booleans, 0/1 integers and floats, truthy/falsy strings, and
+    single-element sequences.
+
+    Args:
+        value: Raw value from a SolidWorks COM attribute or method return.
+
+    Returns:
+        bool | None: ``True``, ``False``, or ``None`` when the value is
+        ambiguous or unrecognised.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and int(value) in (0, 1):
+        return bool(int(value))
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "fully_defined", "fully defined"}:
+            return True
+        if normalized in {
+            "false",
+            "no",
+            "under_defined",
+            "under defined",
+            "over_defined",
+            "over defined",
+        }:
+            return False
+    if isinstance(value, (list, tuple)) and value:
+        return _to_bool(value[0])
+    return None
+
+
+def _to_number(value: Any) -> float | None:
+    """Normalise an arbitrary raw value to a float.
+
+    Args:
+        value: Raw value from a COM attribute or method return.
+
+    Returns:
+        float | None: Numeric value, or ``None`` when conversion fails.
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    if isinstance(value, (list, tuple)) and value:
+        return _to_number(value[0])
+    return None
+
+
+def _probe_to_flag(source: str, raw: Any) -> bool | None:
+    """Interpret a raw probe result according to the property-name semantics.
+
+    The SolidWorks API uses both positive and negative naming conventions
+    (``IsFullyConstrained`` vs ``IsUnderDefined``) so the source name is
+    used as a hint when interpreting the raw value.
+
+    Args:
+        source: The name of the API attribute that produced ``raw``, e.g.
+            ``"IsFullyConstrained"`` or ``"IsUnderDefined"``.
+        raw: The raw return value from the COM attribute.
+
+    Returns:
+        bool | None: ``True`` if the sketch is fully defined, ``False`` if
+        not, or ``None`` when interpretation is impossible.
+    """
+    source_lower = source.lower()
+    text_value = str(raw).strip().lower() if raw is not None else ""
+    numeric_value = _to_number(raw)
+
+    if "underdefined" in source_lower or "under_defined" in source_lower:
+        if numeric_value is not None:
+            return numeric_value == 0
+        bool_value = _to_bool(raw)
+        if bool_value is not None:
+            return not bool_value
+
+    if "overdefined" in source_lower or "over_defined" in source_lower:
+        if numeric_value is not None and numeric_value > 0:
+            return False
+        bool_value = _to_bool(raw)
+        if bool_value is True:
+            return False
+
+    if "fullydefined" in source_lower or "fully_defined" in source_lower:
+        bool_value = _to_bool(raw)
+        if bool_value is not None:
+            return bool_value
+
+    if "fully" in text_value and "under" not in text_value and "over" not in text_value:
+        return True
+    if "under" in text_value or "over" in text_value:
+        return False
+
+    return _to_bool(raw)
+
+
+def _state_from_bool(flag: bool | None) -> str:
+    """Convert a nullable bool flag to a descriptive state string.
+
+    Args:
+        flag: The fully-defined flag value.
+
+    Returns:
+        str: ``"fully_defined"``, ``"not_fully_defined"``, or
+        ``"unknown"``.
+    """
+    if flag is True:
+        return "fully_defined"
+    if flag is False:
+        return "not_fully_defined"
+    return "unknown"
 
 
 def _check_sketch_fully_defined_impl(
@@ -2185,127 +2268,7 @@ def _check_sketch_fully_defined_impl(
     if not adapter.currentModel:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
 
-    def _to_bool(value: Any) -> bool | None:  # pragma: no cover
-        """Normalise an arbitrary raw value to a Python bool.
-
-        Handles booleans, 0/1 integers and floats, truthy/falsy strings, and
-        single-element sequences.
-
-        Args:
-            value: Raw value from a SolidWorks COM attribute or method return.
-
-        Returns:
-            bool | None: ``True``, ``False``, or ``None`` when the value is
-            ambiguous or unrecognised.
-        """
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)) and int(value) in (0, 1):
-            return bool(int(value))
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"true", "yes", "fully_defined", "fully defined"}:
-                return True
-            if normalized in {
-                "false",
-                "no",
-                "under_defined",
-                "under defined",
-                "over_defined",
-                "over defined",
-            }:
-                return False
-        if isinstance(value, (list, tuple)) and value:
-            return _to_bool(value[0])
-        return None
-
-    def _to_number(value: Any) -> float | None:  # pragma: no cover
-        """Normalise an arbitrary raw value to a float.
-
-        Args:
-            value: Raw value from a COM attribute or method return.
-
-        Returns:
-            float | None: Numeric value, or ``None`` when conversion fails.
-        """
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return float(value.strip())
-            except ValueError:
-                return None
-        if isinstance(value, (list, tuple)) and value:
-            return _to_number(value[0])
-        return None
-
-    def _probe_to_flag(source: str, raw: Any) -> bool | None:  # pragma: no cover
-        """Interpret a raw probe result according to the property-name semantics.
-
-        The SolidWorks API uses both positive and negative naming conventions
-        (``IsFullyConstrained`` vs ``IsUnderDefined``) so the source name is
-        used as a hint when interpreting the raw value.
-
-        Args:
-            source: The name of the API attribute that produced ``raw``, e.g.
-                ``"IsFullyConstrained"`` or ``"IsUnderDefined"``.
-            raw: The raw return value from the COM attribute.
-
-        Returns:
-            bool | None: ``True`` if the sketch is fully defined, ``False`` if
-            not, or ``None`` when interpretation is impossible.
-        """
-        source_lower = source.lower()
-        text_value = str(raw).strip().lower() if raw is not None else ""
-        numeric_value = _to_number(raw)
-
-        if "underdefined" in source_lower or "under_defined" in source_lower:
-            if numeric_value is not None:
-                return numeric_value == 0
-            bool_value = _to_bool(raw)
-            if bool_value is not None:
-                return not bool_value
-
-        if "overdefined" in source_lower or "over_defined" in source_lower:
-            if numeric_value is not None and numeric_value > 0:
-                return False
-            bool_value = _to_bool(raw)
-            if bool_value is True:
-                return False
-
-        if "fullydefined" in source_lower or "fully_defined" in source_lower:
-            bool_value = _to_bool(raw)
-            if bool_value is not None:
-                return bool_value
-
-        if (
-            "fully" in text_value
-            and "under" not in text_value
-            and "over" not in text_value
-        ):
-            return True
-        if "under" in text_value or "over" in text_value:
-            return False
-
-        return _to_bool(raw)
-
-    def _state_from_bool(flag: bool | None) -> str:  # pragma: no cover
-        """Convert a nullable bool flag to a descriptive state string.
-
-        Args:
-            flag: The fully-defined flag value.
-
-        Returns:
-            str: ``"fully_defined"``, ``"not_fully_defined"``, or
-            ``"unknown"``.
-        """
-        if flag is True:
-            return "fully_defined"
-        if flag is False:
-            return "not_fully_defined"
-        return "unknown"
-
-    def _get_sketch_payload() -> dict[str, Any]:  # pragma: no cover
+    def _get_sketch_payload() -> dict[str, Any]:
         """Main inner closure that locates the sketch and probes its constraint status.
 
         Resolves the sketch feature by name (falling back to the last-known
@@ -2350,11 +2313,6 @@ def _check_sketch_fully_defined_impl(
 
         if sketch_obj is None and sketch_feature is None:
             raise Exception("No active sketch found")
-
-        if resolved_name is None and sketch_feature is not None:
-            resolved_name = adapter._attempt(
-                lambda: str(sketch_feature.Name), default=None
-            )
 
         probes: list[tuple[str, Any]] = []
 

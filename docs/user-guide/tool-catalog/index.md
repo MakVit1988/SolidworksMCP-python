@@ -1,6 +1,6 @@
-# Tool Catalog — All 134 Tools
+# Tool Catalog — All 138 Tools
 
-This reference documents all **134 MCP tools** registered by the SolidWorks MCP server.
+This reference documents all **138 MCP tools** registered by the SolidWorks MCP server.
 Each section covers one functional category with parameter tables and copy-paste sample calls.
 
 ![Tool categories overview — 109 tools across 12 functional areas](../../assets/images/tool-categories-overview.svg)
@@ -9,9 +9,9 @@ Each section covers one functional category with parameter tables and copy-paste
 
 | Category | Count | Description |
 |----------|-------|-------------|
-| [Modeling Tools](modeling.md) | 27 | Create and manipulate SolidWorks parts, assemblies, and drawings — sketches, extrusions, revolves, dimensions, feature renaming, chamfers/fillets, and the document unit system. |
+| [Modeling Tools](modeling.md) | 30 | Create and manipulate SolidWorks parts, assemblies, and drawings — sketches, extrusions, revolves, dimensions, feature renaming, chamfers/fillets, and the document unit system. |
 | [Sketching Tools](sketching.md) | 19 | Build 2-D sketch geometry (lines, circles, arcs, splines, polygons) and apply geometric constraints and dimensions. |
-| [Drawing Tools](drawing.md) | 13 | Create and edit 2-D technical drawings: add projected, section, and detail views, place annotations, and auto-dimension layouts. |
+| [Drawing Tools](drawing.md) | 14 | Create and edit 2-D technical drawings: add projected, section, and detail views, place annotations, and auto-dimension layouts. |
 | [Drawing Analysis Tools](drawing-analysis.md) | 8 | Quality-gate your drawings by analyzing dimensions, annotations, view coverage, standards compliance, and completeness. |
 | [Analysis Tools](analysis.md) | 5 | Extract engineering properties from models, including mass, volume, center of mass, inertia, and material metadata. |
 | [Export Tools](export.md) | 7 | Convert SolidWorks models to industry-standard interchange and manufacturing formats such as STEP, IGES, STL, DWG, PDF, and images. |
@@ -24,18 +24,49 @@ Each section covers one functional category with parameter tables and copy-paste
 
 ## Standard Response Envelope
 
-Every tool returns a dictionary with at least:
+A successful call returns at least:
 
 ```json
 {
-  "status": "success" | "error",
+  "status": "success",
   "message": "Human-readable description",
   "data": { ... },
   "execution_time": 0.123
 }
 ```
 
-On error, `data` is omitted and `message` contains the failure reason.
+Every tool runs inside one error boundary, so a failed call always has the
+same shape, whatever went wrong:
+
+```json
+{
+  "status": "error",
+  "message": "What failed and why",
+  "error_type": "no_active_document",
+  "hint": "Open or create a document first (open_model / create_part), or activate one with activate_document, then retry.",
+  "execution_time": 0.012
+}
+```
+
+`data` appears on an error only when the adapter returned diagnostics worth
+keeping (for example `rebuild_model` lists the failing features). `error_type`
+says what kind of failure it was; `hint` is the next step to take:
+
+| `error_type` | Meaning |
+|---|---|
+| `invalid_input` | The arguments failed validation; nothing was sent to SolidWorks |
+| `not_supported` | The active adapter cannot do this (e.g. the mock adapter, or a missing capability) |
+| `no_active_document` | The tool needs an open document and there is none |
+| `no_active_sketch` | The tool needs an open sketch and there is none |
+| `wrong_document_type` | The active document is the wrong kind (e.g. a part where a drawing is needed) |
+| `not_found` | A named feature, document, view, file, face or edge does not exist |
+| `solidworks_unavailable` | SolidWorks was closed or crashed (RPC disconnect) |
+| `circuit_open` | Calls are paused after repeated failures; retry after the breaker timeout |
+| `com_wrong_thread` | A SolidWorks call ran off the thread that connected (a server bug; restart the server) |
+| `com_member_not_found` | SolidWorks could not resolve an API member (usually a stale `gen_py` cache) |
+| `com_type_mismatch` | SolidWorks rejected an argument's COM type (a server bug; report it) |
+| `operation_failed` | SolidWorks refused or failed the operation; read `message` |
+| `internal` | An unexpected server error (a bug; report the tool and arguments) |
 
 ## Request → Response Flow
 

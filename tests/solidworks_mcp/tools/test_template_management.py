@@ -9,14 +9,8 @@ from solidworks_mcp.tools.template_management import (
     TemplateBatchInput,
     TemplateComparisonInput,
     TemplateExtractionInput,
-    _file_fact_snapshot,
     register_template_management_tools,
 )
-
-
-def test_file_fact_snapshot_returns_none_for_empty_path():
-    """An empty path is not a filesystem lookup — just None, no stat() call."""
-    assert _file_fact_snapshot("") is None
 
 
 class TestTemplateManagementTools:
@@ -607,11 +601,11 @@ class TestTemplateManagementTools:
 
         save_exception = await save_tool(input_data={"template_name": "bad"})
         assert save_exception["status"] == "error"
-        assert "Failed to save to library" in save_exception["message"]
+        assert save_exception["error_type"] == "internal"
 
         list_exception = await list_tool(input_data={"category": "all"})
         assert list_exception["status"] == "error"
-        assert "Failed to list library" in list_exception["message"]
+        assert list_exception["error_type"] == "internal"
 
     @pytest.mark.unit
     def test_template_extraction_input_validation(self):

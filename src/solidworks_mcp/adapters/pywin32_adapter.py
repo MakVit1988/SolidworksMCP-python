@@ -8,6 +8,7 @@ import asyncio
 import os
 import platform
 import re
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -28,6 +29,7 @@ from .solidworks import (
     SolidWorksSelectionMixin,
     SolidWorksSketchMixin,
 )
+from .solidworks.features import _null_callout, _select_feature_by_name
 from .solidworks.io import _byref_int
 
 try:
@@ -37,7 +39,7 @@ try:
     from win32com.client import dynamic as _dynamic_module
 
     PYWIN32_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     # Keep names defined for tests that patch module attributes on non-Windows CI.
     pythoncom = SimpleNamespace()
     pywintypes = SimpleNamespace(com_error=Exception)
@@ -141,6 +143,60 @@ def _headless_requested() -> bool:
     }
 
 
+# Operations that open, create, close or switch documents. SolidWorks rebuilds
+# its UI (document window, CommandManager tabs, task panes) for each of these,
+# so they get the longer settle pause.
+_DOCUMENT_OPERATIONS = frozenset(
+    {
+        "activate_document",
+        "close_model",
+        "create_assembly",
+        "create_drawing",
+        "create_part",
+        "create_technical_drawing",
+        "open_model",
+        "pack_and_go_assembly",
+        "save_body_as_part",
+    }
+)
+# Defaults in seconds; override with the environment variables below.
+_DEFAULT_COM_SETTLE_SECONDS = 0.25
+_DEFAULT_DOC_SETTLE_SECONDS = 1.0
+
+
+def _settle_seconds(variable: str, default: float) -> float:
+    """Read a non-negative settle pause from the environment."""
+    try:
+        return max(0.0, float(os.getenv(variable, default)))
+    except ValueError:
+        return default
+
+
+def _settle_after(operation_name: str) -> None:
+    """Pause after a COM operation so SolidWorks can finish its UI work.
+
+    SolidWorks does part of each operation's work later, in its idle loop
+    (CommandManager/task-pane refresh). Firing the next call while that is in
+    progress re-enters it, and SolidWorks 2026 crashed there repeatedly under
+    back-to-back API calls (COM pitfall #26). A human never drives it that
+    fast. Tunable via ``SOLIDWORKS_MCP_COM_SETTLE_SECONDS`` (every operation)
+    and ``SOLIDWORKS_MCP_DOC_SETTLE_SECONDS`` (document open/create/close).
+
+    Args:
+        operation_name: The ``_handle_com_operation`` name just completed.
+    """
+    if operation_name in _DOCUMENT_OPERATIONS:
+        pause = _settle_seconds(
+            "SOLIDWORKS_MCP_DOC_SETTLE_SECONDS", _DEFAULT_DOC_SETTLE_SECONDS
+        )
+    else:
+        pause = _settle_seconds(
+            "SOLIDWORKS_MCP_COM_SETTLE_SECONDS", _DEFAULT_COM_SETTLE_SECONDS
+        )
+    if pause > 0:
+        time.sleep(pause)
+
+
 def _run_macro_error_name(code: Any) -> str:
     """Render a swRunMacroError_e code as ``"<n> (<Name>)"`` when known."""
     try:
@@ -239,6 +295,8 @@ class _ComSessionCoordinator:
             return
         pythoncom.CoInitialize()
         self._adapter._com_initialized = True
+        # SolidWorks COM objects are STA-bound: only this thread may use them.
+        self._adapter._com_thread_id = threading.get_ident()
 
     def uninitialize_com_apartment(self) -> None:
         """Release the COM apartment via ``pythoncom.CoUninitialize``.
@@ -254,6 +312,7 @@ class _ComSessionCoordinator:
             return
         pythoncom.CoUninitialize()
         self._adapter._com_initialized = False
+        self._adapter._com_thread_id = None
 
     async def acquire_solidworks_application(self) -> Any:
         """Acquire a live SolidWorks COM application object with retries.
@@ -328,7 +387,7 @@ class _ComSessionCoordinator:
                 lambda: self._adapter._get_attr_or_call(app, "RevisionNumber"),
                 default=None,
             )
-            if revision is not None:  # pragma: no cover
+            if revision is not None:
                 return
             await asyncio.sleep(0.5)
 
@@ -562,11 +621,11 @@ class _SketchGeometryService:
         dimension_obj = self._adapter._attempt(
             lambda: display_dim.GetDimension2(0), default=None
         )
-        if dimension_obj is None:  # pragma: no cover
+        if dimension_obj is None:
             dimension_obj = self._adapter._attempt(
                 lambda: display_dim.GetDimension(), default=None
             )
-        if dimension_obj is None:  # pragma: no cover
+        if dimension_obj is None:
             dimension_obj = display_dim
 
         if (
@@ -644,7 +703,7 @@ class _SketchGeometryService:
             bool: ``True`` when a setter call succeeded; ``False`` otherwise
             (including when ``point_obj`` is ``None``).
         """
-        if point_obj is None:  # pragma: no cover
+        if point_obj is None:
             return False
         if (
             self._adapter._attempt(lambda: point_obj.SetCoords(x, y, z), default=None)
@@ -686,7 +745,7 @@ class _SketchGeometryService:
                 (float(start[0]), float(start[1]), float(start[2])),
                 (float(end[0]), float(end[1]), float(end[2])),
             )
-        return None  # pragma: no cover
+        return None
 
     def segment_point_objects(self, entity: Any) -> tuple[Any | None, Any | None]:
         """Return the COM point objects at the start and end of a segment.
@@ -730,11 +789,11 @@ class _SketchGeometryService:
         tol = 1e-6
         for point1 in points1:
             xyz1 = self.point_xyz(point1)
-            if xyz1 is None:  # pragma: no cover
+            if xyz1 is None:
                 continue
             for point2 in points2:
                 xyz2 = self.point_xyz(point2)
-                if xyz2 is None:  # pragma: no cover
+                if xyz2 is None:
                     continue
                 if (
                     abs(xyz1[0] - xyz2[0]) <= tol
@@ -742,7 +801,7 @@ class _SketchGeometryService:
                     and abs(xyz1[2] - xyz2[2]) <= tol
                 ):
                     return (point1, point1, point2)
-        return None  # pragma: no cover
+        return None
 
     def smart_dimension_direction(self, dx: float, dy: float) -> int:
         """Map a 2-D direction vector to a SolidWorks dimension-direction constant.
@@ -799,7 +858,7 @@ class _SketchGeometryService:
                 text_x, text_y, text_z, direction = placement
         """
         endpoints = self.read_segment_endpoints(entity)
-        if endpoints is None:  # pragma: no cover
+        if endpoints is None:
             return None
 
         (x1, y1, z1), (x2, y2, z2) = endpoints
@@ -843,7 +902,7 @@ class _SketchGeometryService:
         """
         endpoints1 = self.read_segment_endpoints(entity1)
         endpoints2 = self.read_segment_endpoints(entity2)
-        if endpoints1 is None or endpoints2 is None:  # pragma: no cover
+        if endpoints1 is None or endpoints2 is None:
             return None
 
         pts1 = endpoints1
@@ -875,7 +934,7 @@ class _SketchGeometryService:
         v2y = ray2[1] - vertex[1]
         l1 = (v1x * v1x + v1y * v1y) ** 0.5
         l2 = (v2x * v2x + v2y * v2y) ** 0.5
-        if l1 <= 1e-9 or l2 <= 1e-9:  # pragma: no cover
+        if l1 <= 1e-9 or l2 <= 1e-9:
             return None
 
         b1x = v1x / l1
@@ -884,7 +943,7 @@ class _SketchGeometryService:
         b2y = v2y / l2
         bis_x = b1x + b2x
         bis_y = b1y + b2y
-        if abs(bis_x) <= 1e-9 and abs(bis_y) <= 1e-9:  # pragma: no cover
+        if abs(bis_x) <= 1e-9 and abs(bis_y) <= 1e-9:
             bis_x = -b1y
             bis_y = b1x
 
@@ -936,7 +995,7 @@ class _DocumentRoutingService:
             ``title`` is the raw display title.  Either element is ``None``
             when the corresponding attribute is absent or empty.
         """
-        if document is None:  # pragma: no cover
+        if document is None:
             return None, None
 
         raw_path = self._adapter._attempt(lambda: document.GetPathName(), default=None)
@@ -977,9 +1036,9 @@ class _DocumentRoutingService:
             if self._adapter.swApp
             else None
         )
-        if self._adapter.currentModel is None:  # pragma: no cover
+        if self._adapter.currentModel is None:
             return active_doc
-        if active_doc is None:  # pragma: no cover
+        if active_doc is None:
             return self._adapter.currentModel
 
         current_path, current_title = self.document_identity(self._adapter.currentModel)
@@ -1090,11 +1149,61 @@ class _FeatureSelectionService:
             candidates.append(f"{feature_name}@{doc_title}")
         return candidates
 
+    def try_select_by_feature_name(
+        self,
+        target_doc: Any,
+        feature_name: str,
+        append: bool = False,
+    ) -> dict[str, Any] | None:
+        """Select via ``FeatureByName`` + ``IFeature::Select2`` (first strategy).
+
+        Delegates to the shared ``features._select_feature_by_name`` helper -
+        the path suppress/rename already rely on, and the one confirmed live
+        on R2026x for solid features, sketches and reference planes. It does
+        not resolve assembly components, which fall through to
+        :meth:`try_select_by_component`.
+
+        Args:
+            target_doc: SolidWorks ``IModelDoc2`` COM object (the adapter's
+                ``currentModel``; the helper reads it from the adapter).
+            feature_name: Feature name; any ``@document`` qualifier is
+                stripped by the helper.
+            append: Add to the current selection. Defaults to False.
+
+        Returns:
+            dict[str, Any] | None: Success payload (same schema as
+            :meth:`try_select_by_extension`) with ``entity_type`` set to
+            ``"feature-name"``, or ``None`` when it could not be selected.
+        """
+        if "@" in feature_name:
+            # FeatureByName only sees this document's own tree. A name
+            # qualified with anything but this document (e.g. a component
+            # path "Front Plane@Part1-1@Assem1") must reach the qualified
+            # SelectByID2 strategies, or the assembly's own "Front Plane"
+            # would be selected instead.
+            bare = feature_name.split("@", 1)[0]
+            own_names = self.build_feature_candidate_names(bare, target_doc)
+            if feature_name not in own_names:
+                return None
+        feature = _select_feature_by_name(self._adapter, feature_name, append)
+        if feature is None:
+            return None
+        selected_name = self._adapter._attempt(
+            lambda: str(feature.Name or ""), default=""
+        )
+        return {
+            "selected": True,
+            "feature_name": feature_name,
+            "selected_name": selected_name or feature_name.split("@", 1)[0],
+            "entity_type": "feature-name",
+        }
+
     def try_select_by_extension(
         self,
         target_doc: Any,
         candidate_names: list[str],
         feature_name: str,
+        append: bool = False,
     ) -> dict[str, Any] | None:
         """Attempt feature selection via ``Extension.SelectByID2``.
 
@@ -1109,6 +1218,7 @@ class _FeatureSelectionService:
                 qualified variants from :meth:`build_feature_candidate_names`).
             feature_name: The original caller-supplied name, included in the
                 result payload for traceability.
+            append: Add to the current selection. Defaults to False.
 
         Returns:
             dict[str, Any] | None: On success, a result dict with keys
@@ -1119,8 +1229,18 @@ class _FeatureSelectionService:
         for candidate in candidate_names:
             for entity_type in entity_types:
                 try:
+                    # Callout must be a VT_DISPATCH null; Python None is a
+                    # Type mismatch (runbook #11, confirmed live 2026-10-13).
                     selected = target_doc.Extension.SelectByID2(
-                        candidate, entity_type, 0, 0, 0, False, 0, None, 0
+                        candidate,
+                        entity_type,
+                        0,
+                        0,
+                        0,
+                        append,
+                        0,
+                        _null_callout(),
+                        0,
                     )
                     if selected:
                         return {
@@ -1138,6 +1258,7 @@ class _FeatureSelectionService:
         target_doc: Any,
         candidate_names: list[str],
         feature_name: str,
+        append: bool = False,
     ) -> dict[str, Any] | None:
         """Attempt component selection for assembly-context features.
 
@@ -1156,6 +1277,7 @@ class _FeatureSelectionService:
                 before the first ``@`` is used as the component name.
             feature_name: Original caller-supplied name for the result
                 payload.
+            append: Add to the current selection. Defaults to False.
 
         Returns:
             dict[str, Any] | None: Success dict (same schema as
@@ -1175,9 +1297,9 @@ class _FeatureSelectionService:
             if component is None:
                 continue
             for method_name, args in [
-                ("Select4", (False, None, False)),
-                ("Select", (False,)),
-                ("Select2", (False, 0)),
+                ("Select4", (append, None, False)),
+                ("Select", (append,)),
+                ("Select2", (append, 0)),
             ]:
                 selector = getattr(component, method_name, None)
                 if not callable(selector):
@@ -1199,6 +1321,7 @@ class _FeatureSelectionService:
         target_doc: Any,
         feature_name: str,
         candidate_names: list[str],
+        append: bool = False,
     ) -> dict[str, Any] | None:
         """Walk the SolidWorks feature tree and select the first matching feature.
 
@@ -1217,6 +1340,7 @@ class _FeatureSelectionService:
                 payload.
             candidate_names: Candidate names used to build the normalised
                 match set.
+            append: Add to the current selection. Defaults to False.
 
         Returns:
             dict[str, Any] | None: Success dict (same schema as
@@ -1235,6 +1359,14 @@ class _FeatureSelectionService:
         while feature and guard < 10000:
             guard += 1
             feature_ref = feature
+            # Unflagged, GetNextFeature/Select2 resolve as properties and the
+            # walk dies with "Member not found" (confirmed live 2026-10-13).
+            self._adapter._attempt(
+                lambda f=feature_ref: sw_type_info.flag_members(  # type: ignore[misc]
+                    f, "GetNextFeature", "Select2"
+                ),
+                default=0,
+            )
             tree_name = self._adapter._attempt(
                 lambda current_feature=feature_ref: str(current_feature.Name or ""),  # type: ignore[misc]
                 default="",
@@ -1243,7 +1375,7 @@ class _FeatureSelectionService:
                 tree_name, normalized_candidates, normalized_bases
             ):
                 try:
-                    if feature.Select2(False, 0):
+                    if feature.Select2(append, 0):
                         return {
                             "selected": True,
                             "feature_name": feature_name,
@@ -1284,28 +1416,43 @@ class _FeatureSelectionService:
             return True
         return normalized_name.split("@", 1)[0] in normalized_bases
 
-    def select_feature(self, feature_name: str) -> dict[str, Any]:
-        """Run all feature-selection strategies and return best-effort payload.
+    def select_feature(self, feature_name: str, append: bool = False) -> dict[str, Any]:
+        """Run the feature-selection strategies in order; first success wins.
+
+        Order: ``FeatureByName`` (cheapest, proven live), ``SelectByID2``
+        over candidate names x entity types (planes, mates), component
+        selection (assemblies), then a feature-tree walk.
 
         Args:
             feature_name: Feature name requested by caller.
+            append: Add to the current selection. Defaults to False.
 
         Returns:
-            dict[str, Any]: Selection result payload.
+            dict[str, Any]: Selection payload; ``selected`` is False only when
+            every strategy failed (the adapter maps that to an ERROR).
         """
         target_doc = self._adapter.currentModel
-        candidate_names = self.build_feature_candidate_names(feature_name, target_doc)
 
-        result = self.try_select_by_extension(target_doc, candidate_names, feature_name)
+        result = self.try_select_by_feature_name(target_doc, feature_name, append)
         if result:
             return result
 
-        result = self.try_select_by_component(target_doc, candidate_names, feature_name)
+        candidate_names = self.build_feature_candidate_names(feature_name, target_doc)
+
+        result = self.try_select_by_extension(
+            target_doc, candidate_names, feature_name, append
+        )
+        if result:
+            return result
+
+        result = self.try_select_by_component(
+            target_doc, candidate_names, feature_name, append
+        )
         if result:
             return result
 
         result = self.try_select_by_feature_tree(
-            target_doc, feature_name, candidate_names
+            target_doc, feature_name, candidate_names, append
         )
         if result:
             return result
@@ -1722,12 +1869,12 @@ class PyWin32Adapter(
                             adapter = PyWin32Adapter(config)
                             ```
         """
-        if not PYWIN32_AVAILABLE:  # pragma: no cover
+        if not PYWIN32_AVAILABLE:
             raise SolidWorksMCPError(
                 "pywin32 is not available. Install with: pip install pywin32"
             )
 
-        if platform.system() != "Windows":  # pragma: no cover
+        if platform.system() != "Windows":
             raise SolidWorksMCPError("PyWin32Adapter requires Windows platform")
 
         super().__init__(config)
@@ -1747,6 +1894,8 @@ class PyWin32Adapter(
         self._sketch_entity_centers: dict[str, tuple[float, float]] = {}
         self._sketch_entity_counter = 0
         self._com_initialized = False
+        # Thread that initialised the COM apartment (see _handle_com_operation).
+        self._com_thread_id: int | None = None
 
         # COM constants (equivalent to SolidWorks API constants)
         self.constants = {
@@ -1819,19 +1968,6 @@ class PyWin32Adapter(
             SolidWorksMCPError: If readiness probe times out.
         """
         await self._session_coordinator.wait_for_server_ready(app)
-
-    def _set_automation_preferences(  # pragma: no cover
-        self, app: Any, *, interactive: bool
-    ) -> None:
-        """Toggle SolidWorks warning/question prompts for automation safety.
-
-        Args:
-            app: SolidWorks application COM object.
-            interactive: ``True`` restores dialogs, ``False`` suppresses them.
-        """
-        self._session_coordinator.set_automation_preferences(
-            app, interactive=interactive
-        )
 
     async def connect(self) -> None:
         """Connect to SolidWorks COM and prepare automation-safe session state.
@@ -1958,6 +2094,20 @@ class PyWin32Adapter(
                                 print("Sketch created successfully")
                             ```
         """
+        owner = self._com_thread_id
+        if owner is not None and threading.get_ident() != owner:
+            # Using an STA-bound IDispatch from another thread fails with a
+            # cryptic late-binding AttributeError (runbook #5); refuse clearly
+            # before touching COM.
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=(
+                    f"{operation_name} was called from thread "
+                    f"{threading.current_thread().name!r}, but SolidWorks COM "
+                    "objects belong to the thread that called connect()."
+                ),
+                execution_time=0.0,
+            )
         start_time = time.time()
 
         try:
@@ -1985,12 +2135,20 @@ class PyWin32Adapter(
         except Exception as e:
             execution_time = time.time() - start_time
             self.update_metrics(execution_time, False)
-            logger.exception("Operation {} failed", operation_name)
+            if isinstance(e, LookupError):
+                # An expected answer ("no feature named X"), not a fault:
+                # one line, no traceback.
+                logger.warning("Operation {} found nothing: {}", operation_name, e)
+            else:
+                logger.exception("Operation {} failed", operation_name)
             return AdapterResult(
                 status=AdapterResultStatus.ERROR,
                 error=f"Error in {operation_name}: {e}",
                 execution_time=execution_time,
             )
+        finally:
+            # After the timing above, so execution_time stays the call itself.
+            _settle_after(operation_name)
 
     def _attempt(
         self, operation: Callable[[], T], default: T | None = None
@@ -2321,7 +2479,7 @@ class PyWin32Adapter(
 
             # Remove any pre-existing file so SolidWorks never shows the
             # "already exists — replace?" confirmation dialog.
-            if _os.path.exists(resolved):  # pragma: no cover
+            if _os.path.exists(resolved):
                 _os.remove(resolved)
 
             # Try screenshot methods in order: ModelView → TargetDoc → SaveAs3

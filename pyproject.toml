@@ -31,7 +31,7 @@ dependencies = [
     "fastmcp>=3.2.2",
     "mcp>=1.28.1",
     "pydantic>=2.5.0",
-    "pydantic-ai>=1.56.0",
+    "pydantic-ai-slim[openai,anthropic,mcp]>=1.107.4,<2",
     "sqlmodel>=0.0.22",
     "chardet<6",
     "pywin32>=306; platform_system=='Windows'",
@@ -94,7 +94,9 @@ test = [
     "numpy>=1.26.0",
 ]
 docs = [
-    "mkdocs>=1.5.0",
+    # <2: MkDocs 2 is announced to drop support for existing themes, plugins
+    # and configs (#46); stay on 1.x until the ecosystem moves.
+    "mkdocs>=1.5.0,<2",
     "mkdocs-material>=9.4.0",
     "mkdocs-awesome-pages-plugin>=2.9.0",
     "mkdocs-mermaid2-plugin>=1.1.0",
@@ -140,7 +142,10 @@ solidworks-mcp = "solidworks_mcp.server:cli_main"
 #   separate migration
 # - CVE-2026-102266..102273 (pyjwt < 2.14.0)
 # - CVE-2026-97687, CVE-2026-97689 (urllib3 < 2.8.0)
-# - CVE-2026-102925, -102930, -102937 (virtualenv < 21.7.13)
+# - CVE-2026-102925, -102930, -102937, -113722, -113725 (virtualenv < 21.14.9).
+#   Needs packaging>=26.3, which is why the project depends on
+#   pydantic-ai-slim with only the extras it uses: full pydantic-ai pulls in
+#   xai-sdk, which pins packaging<26.
 constraint-dependencies = [
     "httpx2>=2.12.0",
     "httpcore2>=2.12.0",
@@ -150,7 +155,7 @@ constraint-dependencies = [
     "pydantic-ai-slim>=1.107.4,<2",
     "pyjwt>=2.14.0",
     "urllib3>=2.8.0",
-    "virtualenv>=21.7.13",
+    "virtualenv>=21.14.9",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -217,23 +222,23 @@ timeout = 300
 
 [tool.coverage.run]
 source = ["src/solidworks_mcp"]
+# Measure child Python processes too: the "dependency not installed" import
+# fallbacks are tested by importing a module in a subprocess with the
+# dependency blocked (see the import_without fixture in tests/conftest.py).
+patch = ["subprocess"]
 omit = [
     "*/tests/*",
     "*/test_*",
     "*/__pycache__/*",
     "*/migrations/*",
-    "*/solidworks_mcp/ui/*",
 ]
 
+# Only genuinely non-executable lines are excluded. There is no
+# "pragma: no cover": unreachable code is deleted, not hidden (see
+# openspec/changes/full-coverage-and-error-boundary/dead-code.md).
 [tool.coverage.report]
 exclude_lines = [
-    "pragma: no cover",
-    "def __repr__",
-    "if self.debug:",
-    "if settings.DEBUG",
-    "raise AssertionError",
-    "raise NotImplementedError",
-    "if 0:",
+    "if TYPE_CHECKING:",
     "if __name__ == .__main__.:",
     "class .*\\bProtocol\\):",
     "@(abc\\.)?abstractmethod",

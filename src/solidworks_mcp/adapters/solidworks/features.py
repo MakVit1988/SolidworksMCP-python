@@ -6,6 +6,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
+from .. import sw_type_info
 from ..base import (
     AdapterResult,
     AdapterResultStatus,
@@ -342,7 +343,7 @@ def _create_extrusion_impl(
     if not adapter.currentModel:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
 
-    def _extrusion_operation() -> SolidWorksFeature:  # pragma: no cover
+    def _extrusion_operation() -> SolidWorksFeature:
         """Inner COM closure that builds and returns the extrusion feature.
 
         Normalises ``params`` into a ``SimpleNamespace`` so every attribute
@@ -549,7 +550,7 @@ def _create_revolve_impl(
     if not adapter.currentModel:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
 
-    def _revolve_operation() -> SolidWorksFeature:  # pragma: no cover
+    def _revolve_operation() -> SolidWorksFeature:
         """Inner COM closure that builds and returns the revolve feature.
 
         Converts the degree angle to radians and invokes ``FeatureRevolve2``.
@@ -574,7 +575,7 @@ def _create_revolve_impl(
 
         import math
 
-        if revolve_sw_major == 33:  # pragma: no cover
+        if revolve_sw_major == 33:
             # IFeatureManager.FeatureRevolve2 - exact 20-parameter signature
             # read from the live gen_py type library for SW 2025:
             #   SingleDir, IsSolid, IsThin, IsCut, ReverseDir,
@@ -623,8 +624,8 @@ def _create_revolve_impl(
                 False,
                 adapter.constants["swEndCondBlind"],
                 adapter.constants["swEndCondBlind"],
-                params.angle * 3.14159 / 180.0,
-                (params.angle * 3.14159 / 180.0) if params.both_directions else 0.0,
+                math.radians(params.angle),
+                math.radians(params.angle) if params.both_directions else 0.0,
                 False,
                 False,
                 0.0,
@@ -699,7 +700,7 @@ def _select_named_feature(
     return bool(adapter._attempt(lambda: feature.Select2(append, mark), default=False))
 
 
-def _flag_feature_methods(obj: Any, interface: str) -> None:  # pragma: no cover
+def _flag_feature_methods(obj: Any, interface: str) -> None:
     """Best-effort method flagging for a COM object via ``sw_type_info``.
 
     Flagging tells pywin32 late binding to resolve names like ``GetTypeName2``
@@ -710,15 +711,10 @@ def _flag_feature_methods(obj: Any, interface: str) -> None:  # pragma: no cover
         obj: The COM object (or test double) to flag.
         interface: SolidWorks interface name (e.g. ``"IFeature"``).
     """
-    try:
-        from solidworks_mcp.adapters import sw_type_info
-
-        sw_type_info.flag_methods(obj, interface)
-    except Exception:
-        pass
+    sw_type_info.flag_methods(obj, interface)
 
 
-def _flag_feature_members(obj: Any, *names: str) -> None:  # pragma: no cover
+def _flag_feature_members(obj: Any, *names: str) -> None:
     """Flag only the named members on ``obj``.
 
     Cheaper than :func:`_flag_feature_methods` inside a loop: flagging a
@@ -731,19 +727,14 @@ def _flag_feature_members(obj: Any, *names: str) -> None:  # pragma: no cover
         obj: The COM object (or test double) to flag.
         *names: Member names about to be read.
     """
-    try:
-        from solidworks_mcp.adapters import sw_type_info
-
-        sw_type_info.flag_members(obj, *names)
-    except Exception:
-        pass
+    sw_type_info.flag_members(obj, *names)
 
 
 #: Members read while walking the feature tree in ``_profile_feature_names``.
 _TREE_WALK_MEMBERS = ("GetTypeName2", "GetNextFeature", "Name")
 
 
-def _read_member(obj: Any, name: str) -> Any:  # pragma: no cover
+def _read_member(obj: Any, name: str) -> Any:
     """Read a COM member that pywin32 may expose as a property *or* a method.
 
     Late-bound pywin32 dispatches are inconsistent: an unflagged zero-arg
@@ -771,7 +762,7 @@ def _read_member(obj: Any, name: str) -> Any:  # pragma: no cover
         return member
 
 
-def _profile_feature_names(adapter: Any) -> list[str]:  # pragma: no cover
+def _profile_feature_names(adapter: Any) -> list[str]:
     """Return sketch (``ProfileFeature``) names in feature-tree order.
 
     Walks ``FirstFeature`` -> ``GetNextFeature`` reading ``GetTypeName2`` and
@@ -864,7 +855,7 @@ def _create_sweep_impl(
             error="Sweep requires a 'path' sketch name",
         )
 
-    def _sweep_operation() -> SolidWorksFeature:  # pragma: no cover
+    def _sweep_operation() -> SolidWorksFeature:
         """Inner COM closure that selects profile + path and runs the sweep.
 
         Returns:
@@ -1018,7 +1009,7 @@ def _create_loft_impl(
             error="Loft requires at least 2 profile sketches",
         )
 
-    def _loft_operation() -> SolidWorksFeature:  # pragma: no cover
+    def _loft_operation() -> SolidWorksFeature:
         """Inner COM closure that selects profiles/guides and runs the loft.
 
         Returns:
@@ -1046,7 +1037,7 @@ def _create_loft_impl(
                 raise Exception(f"Failed to select loft guide curve: {guide}")
 
         # swTangencyType_e: 0 = none, 1 = tangent to profile normal.
-        def _tangency(value: str | None) -> int:  # pragma: no cover
+        def _tangency(value: str | None) -> int:
             return 1 if str(value or "").strip().lower() == "normal" else 0
 
         start_match = _tangency(getattr(params, "start_tangent", None))
@@ -1180,7 +1171,7 @@ def _create_cut_extrude_impl(
     if not adapter.currentModel:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
 
-    def _cut_operation() -> SolidWorksFeature:  # pragma: no cover
+    def _cut_operation() -> SolidWorksFeature:
         """Inner COM closure that locates the active sketch and performs the cut.
 
         Normalises ``params``, resolves the end-condition constant, selects the
@@ -1567,7 +1558,7 @@ def _parse_edge_spec(
     return edge_name, 0.0, 0.0, 0.0, "EDGE"
 
 
-def _select_edge_by_coord(  # pragma: no cover
+def _select_edge_by_coord(
     adapter: Any,
     x: float,
     y: float,
@@ -1675,7 +1666,7 @@ def _add_fillet_impl(
     if not adapter.currentModel:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
 
-    def _fillet_operation() -> SolidWorksFeature:  # pragma: no cover
+    def _fillet_operation() -> SolidWorksFeature:
         """Inner COM closure that selects edges and invokes FeatureFillet3.
 
         Returns:
@@ -1776,16 +1767,22 @@ def _add_fillet_impl(
         # Resolve the feature name — FeatureFillet3 on SW 2025+ returns an int,
         # not an IFeature, so we can only report a default name here.
         feature_name = "Fillet"
-        if feature is not None and hasattr(feature, "Name"):
+        if feature is not None:
+            # Not hasattr(): it only swallows AttributeError, so a stale COM
+            # dispatch raising on Name would fail a fillet that was created.
             try:
                 feature_name = feature.Name or "Fillet"
-            except Exception:
+            except Exception:  # noqa: BLE001 - int return / stale dispatch
                 pass
 
         return SolidWorksFeature(
             name=feature_name,
             type="Fillet",
-            id=adapter._get_feature_id(feature) if feature else "",
+            id=(
+                adapter._attempt(lambda: adapter._get_feature_id(feature), default="")
+                if feature
+                else ""
+            ),
             parameters={"radius": radius, "edges": edge_names},
             properties={"created": datetime.now().isoformat()},
         )
@@ -1840,7 +1837,7 @@ def _add_chamfer_impl(
     if not adapter.currentModel:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
 
-    def _chamfer_operation() -> SolidWorksFeature:  # pragma: no cover
+    def _chamfer_operation() -> SolidWorksFeature:
         """Inner COM closure that selects edges and invokes the chamfer API.
 
         Returns:
@@ -1924,11 +1921,11 @@ def _add_chamfer_impl(
     )
 
 
-def _select_feature_by_name(adapter: Any, name: str) -> Any:
+def _select_feature_by_name(adapter: Any, name: str, append: bool = False) -> Any:
     """Select a feature or sketch by name and return it.
 
     Resolves the entity with ``IModelDoc2::FeatureByName`` and selects it with
-    ``IFeature::Select2(False, 0)`` - the same path used elsewhere in this
+    ``IFeature::Select2(append, 0)`` - the same path used elsewhere in this
     adapter. ``SelectByID2`` is avoided here because it needs an entity-type
     string that differs between sketches and solid features, and because its
     ``Callout`` argument raises ``Type mismatch`` unless passed an explicit
@@ -1937,19 +1934,24 @@ def _select_feature_by_name(adapter: Any, name: str) -> Any:
     Args:
         adapter: A connected adapter with a valid ``currentModel``.
         name: Feature or sketch name, e.g. ``"Boss-Extrude1"`` or ``"Sketch1"``.
+        append: Add to the current selection instead of clearing it first.
+            Defaults to False.
 
     Returns:
         Any: The selected ``IFeature``, or ``None`` when it does not exist or
         could not be selected.
     """
     bare = name.split("@", 1)[0]
-    adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True), default=None)
+    if not append:
+        adapter._attempt(
+            lambda: adapter.currentModel.ClearSelection2(True), default=None
+        )
     feature = adapter._attempt(
         lambda: adapter.currentModel.FeatureByName(bare), default=None
     )
     if not feature:
         return None
-    selected = adapter._attempt(lambda: feature.Select2(False, 0), default=False)
+    selected = adapter._attempt(lambda: feature.Select2(append, 0), default=False)
     return feature if selected else None
 
 
@@ -1973,8 +1975,6 @@ def _feature_count(adapter: Any) -> int | None:
         int | None: The feature count, or ``None`` when it cannot be read -
         which is deliberately distinct from ``0``.
     """
-    from .. import sw_type_info
-
     manager = adapter._attempt(
         lambda: adapter.currentModel.FeatureManager, default=None
     )
@@ -2372,7 +2372,7 @@ class _NullCalloutSentinel:
     plain ``None`` as ``SelectByID2``'s ``Callout`` argument.
     """
 
-    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+    def __repr__(self) -> str:
         return "<null callout: pywin32 unavailable>"
 
 
@@ -2394,7 +2394,7 @@ def _null_callout() -> Any:
     try:
         import pythoncom
         import win32com.client as _win32com
-    except ImportError:  # pragma: no cover - Windows-only path
+    except ImportError:
         return _NULL_CALLOUT_SENTINEL
     return _win32com.VARIANT(pythoncom.VT_DISPATCH, None)
 
@@ -2520,8 +2520,6 @@ def _create_reference_plane_impl(
 
         value, flip_bits = _offset_plane_distance(offset, flip)
         constraint = _REF_PLANE_DISTANCE | flip_bits
-
-        from .. import sw_type_info
 
         feature_manager = sw_type_info.flagged(
             adapter.currentModel.FeatureManager, "IFeatureManager"
@@ -2725,8 +2723,6 @@ def _create_reference_point_impl(
             along_value = float(percent) / 100.0
 
     def _point_operation() -> dict[str, Any]:
-        from .. import sw_type_info
-
         model = adapter.currentModel
         before = _feature_count(adapter)
         adapter._attempt(lambda: model.ForceRebuild3(True), default=None)
@@ -2893,8 +2889,6 @@ def _mirror_feature_impl(
         ):
             raise Exception(f"Failed to select mirror plane: {mirror_plane}")
 
-        from .. import sw_type_info
-
         feature_manager = sw_type_info.flagged(
             adapter.currentModel.FeatureManager, "IFeatureManager"
         )
@@ -3032,8 +3026,6 @@ def _pattern_circular_impl(
                 )
             if not selected:
                 raise Exception(f"Failed to select feature to pattern: {name}")
-
-        from .. import sw_type_info
 
         feature_manager = sw_type_info.flagged(
             adapter.currentModel.FeatureManager, "IFeatureManager"

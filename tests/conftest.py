@@ -25,6 +25,18 @@ from solidworks_mcp.server import SolidWorksMCPServer
 # Test configuration
 os.environ["USE_MOCK_SOLIDWORKS"] = "true"
 
+# The real adapter pauses after every COM operation so live SolidWorks can
+# finish its idle-time UI work (COM pitfall #26). Fake-COM unit tests have
+# nothing to wait for; live runs keep the defaults unless overridden.
+if os.getenv("SOLIDWORKS_MCP_RUN_REAL_INTEGRATION", "").strip().lower() not in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}:
+    os.environ.setdefault("SOLIDWORKS_MCP_COM_SETTLE_SECONDS", "0")
+    os.environ.setdefault("SOLIDWORKS_MCP_DOC_SETTLE_SECONDS", "0")
+
 # Keep the embedding model (sentence-transformers / all-MiniLM-L6-v2) fully
 # local during tests. Without this every SentenceTransformer(...) construction
 # fires ~30 HuggingFace Hub HEAD requests to revalidate the already-cached
@@ -351,3 +363,44 @@ class PerformanceMonitor:
 def perf_monitor() -> PerformanceMonitor:
     """Provide PerformanceMonitor."""
     return PerformanceMonitor()
+
+
+@pytest.fixture
+def import_without():
+    """Import a module in a child interpreter with some dependencies blocked.
+
+    Used to test the "dependency not installed" fallbacks (pywin32, comtypes,
+    pydantic-ai, ...). A child process keeps the blocked import out of this
+    test session; coverage measures it via ``patch = subprocess``.
+
+    Call it with the module to import, the modules to block, and the module
+    attributes to read; it returns those attributes (``repr`` of any value that
+    is not JSON-serialisable) as a dict.
+    """
+    import json
+    import subprocess
+    import sys
+
+    def _run(module: str, blocked: list[str], attributes: list[str]) -> dict:
+        code = (
+            "import json, sys\n"
+            f"for name in {blocked!r}:\n"
+            "    sys.modules[name] = None\n"
+            f"import {module} as target\n"
+            "out = {}\n"
+            f"for attr in {attributes!r}:\n"
+            "    value = getattr(target, attr)\n"
+            "    try:\n"
+            "        json.dumps(value)\n"
+            "        out[attr] = value\n"
+            "    except TypeError:\n"
+            "        out[attr] = repr(value)\n"
+            "print(json.dumps(out))\n"
+        )
+        done = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+        )
+        assert done.returncode == 0, done.stderr
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    return _run

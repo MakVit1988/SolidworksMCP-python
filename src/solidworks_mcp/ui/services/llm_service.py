@@ -402,7 +402,7 @@ async def _run_structured_agent(
         Either an instance of ``result_type`` or a ``RecoverableFailure`` describing
         why the agent call failed and how to recover.
     """
-    if Agent is None:  # pragma: no cover
+    if Agent is None:
         return RecoverableFailure(
             explanation="pydantic_ai is not installed in this environment.",
             remediation_steps=["Install project dependencies and retry."],
@@ -420,11 +420,15 @@ async def _run_structured_agent(
         "Use these tool names in checkpoint plans and rationale fields:\n"
         "  open_model, get_model_info, list_features(include_suppressed), get_mass_properties,\n"
         "  classify_feature_tree, create_sketch, add_line, add_arc, add_circle, add_rectangle,\n"
-        "  create_extrusion, create_revolve, create_cut, export_image, export_step, export_stl,\n"
-        "  select_feature, check_interference, analyze_geometry,\n"
+        "  create_extrusion, create_revolve, create_cut_extrude, export_image, export_step,\n"
+        "  export_stl, select_feature, select_face_edges, add_fillet, add_chamfer,\n"
+        "  rebuild_model, check_interference, analyze_geometry,\n"
         "  generate_vba_code, execute_macro\n"
         "Prefer tools in the order listed above (inspect → classify → plan → execute → verify).\n"
-        "Do not invent tools not in this list."
+        "Do not invent tools not in this list.\n"
+        "A failed tool returns status 'error' with an error_type and a hint: follow the "
+        "hint (open a document, fix the argument, wait for the breaker) instead of "
+        "repeating the same call."
     )
     enriched_system_prompt = (
         "## ROLE AND ORCHESTRATION AGENTS\n"
