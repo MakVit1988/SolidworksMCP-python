@@ -11,6 +11,9 @@ The author verified these on SolidWorks 2025; they are the sign-off on 2026.
 exporting a copy of the "Simple Sheet Metal Part" sample SolidWorks installs
 (skipped when the samples are not installed).
 
+The drawing-dimension tools (from the same PR) are checked on a drawing of the
+same block: each model dimension shown once, then laid out with no overlaps.
+
 Collected only with ``SOLIDWORKS_MCP_RUN_REAL_INTEGRATION=1`` on Windows (see
 ``tests/live/conftest.py``).
 """
@@ -181,3 +184,173 @@ async def test_export_flat_pattern_writes_a_dxf(scratch, tmp_path):
     sections = [s for s in ("HEADER", "ENTITIES", "EOF") if s in text]
     evidence("DXF sections written", sections)
     assert "ENTITIES" in sections
+
+
+async def _drawing_tools(adapter: Any) -> dict[str, Any]:
+    """Register the drawing-automation tools against ``adapter``; name -> fn."""
+    from fastmcp import FastMCP
+
+    from solidworks_mcp.tools.drawing_automation import (
+        register_drawing_automation_tools,
+    )
+
+    mcp = FastMCP("drawing-automation-live")
+    await register_drawing_automation_tools(mcp, adapter, {})
+    return {t.name: t.fn for t in await mcp.list_tools()}
+
+
+async def _block_drawing(scratch, tmp_path) -> str:  # noqa: ANN001
+    """Save the block and lay out its three standard views on a new drawing."""
+    adapter = scratch.adapter
+    await _block(adapter)
+    part = str(tmp_path / "dim_block.SLDPRT")
+    assert (await adapter.save_file(part)).is_success
+    scratch.written_files.append(part)
+    assert (await adapter.create_drawing()).is_success
+    views = await adapter.create_technical_drawing({"model_path": part})
+    assert views.is_success, views.error
+    return part
+
+
+def _layout_snapshot(adapter: Any) -> dict[str, Any]:
+    """What arrange_dimensions reads: view outlines, dimension geometry, overlaps.
+
+    Read-only, through the same calls arrange_dimensions makes, on the
+    connect thread via ``_handle_com_operation``. Millimetres on the sheet.
+    """
+    from solidworks_mcp.adapters.solidworks import dimension_layout as lay
+    from solidworks_mcp.adapters.solidworks.io import _sw_type_info, _view_names
+
+    def mm(values: Any) -> list[float]:
+        return [round(float(v) * 1000, 1) for v in values]
+
+    def read() -> dict[str, Any]:
+        drawing = _sw_type_info.flagged(adapter.currentModel, "IDrawingDoc")
+        outlines, geometries, _ = adapter._collect_layout(
+            drawing, _view_names(adapter, drawing)
+        )
+        sheet = adapter._sheet_bounds(drawing)
+        return {
+            "overlaps": [
+                f"{o['dimension']} {o['kind']} {o['conflicts_with']}"
+                for o in lay.find_overlaps(geometries, outlines, sheet)
+            ],
+            "views_mm": {name: mm(box) for name, box in outlines.items()},
+            "dimensions": [
+                {
+                    "key": g.key,
+                    "orientation": lay.classify(g.lines)[0],
+                    "text_mm": mm(g.text_box),
+                    "lines_mm": [mm(line) for line in g.lines],
+                }
+                for g in geometries
+            ],
+        }
+
+    snapshot = adapter._handle_com_operation("layout_snapshot", read)
+    assert snapshot.is_success, snapshot.error
+    return snapshot.data
+
+
+def _pile_onto_views(adapter: Any) -> None:
+    """Drag every dimension's text onto the middle of its view (worst case).
+
+    On this block SolidWorks imports the dimensions cleanly, so the demo
+    stages the mess arrange_dimensions exists to fix: every dimension on its
+    part and on the others. Same ``IAnnotation::SetPosition`` call the tool
+    makes, on the connect thread.
+    """
+    from solidworks_mcp.adapters.solidworks.io import _sw_type_info, _view_names
+
+    def pile() -> int:
+        model = adapter.currentModel
+        drawing = _sw_type_info.flagged(model, "IDrawingDoc")
+        outlines, geometries, annotations = adapter._collect_layout(
+            drawing, _view_names(adapter, drawing)
+        )
+        moved = 0
+        for g in geometries:
+            o = outlines[g.view]
+            dx = (o[0] + o[2]) / 2 - (g.text_box[0] + g.text_box[2]) / 2
+            dy = (o[1] + o[3]) / 2 - (g.text_box[1] + g.text_box[3]) / 2
+            an = annotations[g.key]
+            z = an.GetPosition()[2]
+            moved += bool(an.SetPosition(g.position[0] + dx, g.position[1] + dy, z))
+        model.EditRebuild3()
+        model.GraphicsRedraw2()
+        return moved
+
+    piled = adapter._handle_com_operation("pile_dimensions", pile)
+    assert piled.is_success and piled.data, piled.error
+
+
+@pytest.mark.asyncio
+async def test_insert_model_dimensions_shows_each_dimension_once(scratch, tmp_path):
+    """Model dimensions land on the views once each; pictorial views are skipped."""
+    adapter = scratch.adapter
+    part = await _block_drawing(scratch, tmp_path)
+    iso = await adapter.create_drawing_view(
+        {"model_path": part, "orientation": "isometric", "position": [330.0, 220.0]}
+    )
+    assert iso.is_success, iso.error
+    tools = await _drawing_tools(adapter)
+
+    result = await tools["insert_model_dimensions"]({})
+    data = result.get("data") or {}
+    evidence(
+        "dimensions on the three views, the isometric skipped",
+        {
+            "message": result.get("message"),
+            "views": [
+                (v["view"], v["dimensions_added"], v["duplicates_removed"])
+                for v in data.get("views", [])
+            ],
+            "unique_dimensions": data.get("unique_dimensions"),
+            "skipped_pictorial_views": data.get("skipped_pictorial_views"),
+        },
+        call="insert_model_dimensions({})",
+    )
+    assert result["status"] == "success", result
+    assert data["dimensions_added"] > 0
+    shown = sum(v["dimensions_after"] for v in data["views"])
+    assert shown == data["unique_dimensions"]  # each dimension once on the sheet
+    assert iso.data["name"] in data["skipped_pictorial_views"]
+
+    missing = await tools["insert_model_dimensions"]({"view_name": "Side"})
+    evidence(
+        "an unknown view is not_found",
+        missing,
+        call='insert_model_dimensions({"view_name": "Side"})',
+    )
+    assert missing["error_type"] == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_arrange_dimensions_clears_every_overlap(scratch, tmp_path):
+    """Dimensions piled on the views are moved off them: zero overlaps after."""
+    adapter = scratch.adapter
+    await _block_drawing(scratch, tmp_path)
+    tools = await _drawing_tools(adapter)
+    inserted = await tools["insert_model_dimensions"]({})
+    assert inserted["status"] == "success", inserted
+    _pile_onto_views(adapter)
+    before = _layout_snapshot(adapter)
+    evidence("BEFORE: every dimension dragged onto its view (staged)", before)
+    assert before["overlaps"], "staging left nothing to fix"
+
+    result = await tools["arrange_dimensions"]({})
+    data = result.get("data") or {}
+    evidence(
+        "every dimension moved off the views",
+        {
+            "message": result.get("message"),
+            "moved": data.get("moved"),
+            "unplaced": data.get("unplaced"),
+            "remaining_overlaps": data.get("remaining_overlaps"),
+        },
+        call="arrange_dimensions({})",
+    )
+    evidence("AFTER arranging", _layout_snapshot(adapter))
+    assert result["status"] == "success", result
+    assert data["overlaps_after"] == 0
+    assert data["moved"] > 0
