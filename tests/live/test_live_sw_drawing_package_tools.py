@@ -4,7 +4,9 @@ Each test calls the registered MCP tool and checks what SolidWorks reports
 afterwards: the sheet's scale and the views' real size for ``set_sheet_scale``,
 the BOM table's own cells for ``insert_bom_table``, and the files, title-block
 properties and read-back overlap check for ``generate_drawing_package``.
-Every test also proves one failure case.
+Every test also proves one failure case. In a demo, the generator's test also
+holds SolidWorks on each build step (sheet, views, layout, dimensions, notes,
+check, title block), so the drawing can be seen filling in.
 
 Collected only with ``SOLIDWORKS_MCP_RUN_REAL_INTEGRATION=1`` on Windows (see
 ``tests/live/conftest.py``).
@@ -41,6 +43,39 @@ async def _saved_block(scratch, path: Path, depth_mm: float = 15.0) -> str:  # n
     assert saved.is_success, saved.error
     scratch.written_files.append(str(path))
     return str(path)
+
+
+#: What each of the generator's COM steps adds to the sheet.
+_BUILD_STEPS = {
+    "standard_drawing_sheet": "build 1/7: the A3 ISO sheet format",
+    "standard_drawing_views": "build 2/7: third-angle views and an isometric",
+    "standard_drawing_layout": "build 3/7: scale chosen, views centred in cells",
+    "standard_drawing_dimensions": "build 4/7: model dimensions, laid out",
+    "standard_drawing_notes": "build 5/7: view captions and the NOTES block",
+    "standard_drawing_check": "build 6/7: overlap check on the real geometry",
+    "standard_drawing_title_block": "build 7/7: title block filled and fitted",
+}
+
+
+def _show_each_build_step(adapter: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hold SolidWorks on the drawing after each of the generator's COM steps.
+
+    Wraps the adapter's ``_handle_com_operation``: each build step runs as
+    before, then its result is shown as evidence (a pause, and a frame when
+    capturing). Nothing about the call itself changes.
+    """
+    original = adapter._handle_com_operation
+
+    def watched(name: str, operation: Any, *args: Any) -> Any:
+        result = original(name, operation, *args)
+        if name in _BUILD_STEPS:
+            evidence(
+                _BUILD_STEPS[name],
+                result.data if result.is_success else {"error": result.error},
+            )
+        return result
+
+    monkeypatch.setattr(adapter, "_handle_com_operation", watched)
 
 
 def _view_widths(adapter: Any) -> dict[str, float]:
@@ -165,6 +200,8 @@ async def test_insert_bom_table_lists_both_parts(scratch, tmp_path):
         call=f'insert_bom_table({{"view_name": "{view}"}})',
     )
     assert result["status"] == "success", result
+    box = result["data"]["table_box_mm"]  # on the 420 x 297 mm sheet
+    assert box and box[0] >= 0 and box[1] >= 0, box
     text = " ".join(" ".join(row) for row in cells)
     assert "bom_plate" in text and "bom_block" in text
 
@@ -194,7 +231,7 @@ async def test_insert_bom_table_on_a_part_view(scratch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_generate_drawing_package_on_a_block(scratch, tmp_path):
+async def test_generate_drawing_package_on_a_block(scratch, tmp_path, monkeypatch):
     """30x30x15 mm block: drawing and PDF written, material and mass shown, no overlaps."""
     adapter = scratch.adapter
     await _block(adapter)
@@ -204,6 +241,7 @@ async def test_generate_drawing_package_on_a_block(scratch, tmp_path):
     scratch.written_files.append(part)
     out = tmp_path / "drawings"
     tools = await _drawing_tools(adapter)
+    _show_each_build_step(adapter, monkeypatch)
 
     result = await tools["generate_drawing_package"](
         {
@@ -230,12 +268,14 @@ async def test_generate_drawing_package_on_a_block(scratch, tmp_path):
             "overlaps_after": (data.get("overlap_check") or {}).get("overlaps_after"),
             "files": [drawing.exists(), pdf.exists()],
             "title_block": title_block,
+            "title_block_fit": data.get("title_block"),
         },
         call='generate_drawing_package({"model_path": "Package Block.SLDPRT", ...})',
     )
     assert result["status"] == "success", result
     assert drawing.exists() and pdf.stat().st_size > 0
     assert data["overlap_check"]["overlaps_after"] == 0
+    assert data["title_block"]["drawing number"]["fits"] is True
     assert "AISI 1020" in shown
     assert "Package Block" in shown
     # 13.5 cm^3 of AISI 1020 (7.87 g/cm^3) is about 106 g; the format shows grams.
