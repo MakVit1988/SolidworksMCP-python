@@ -127,6 +127,62 @@ class TestDrawingPackageTools:
         assert result["data"]["overlap_check"]["overlaps_after"] == 0
 
     @pytest.mark.asyncio
+    async def test_generate_drawing_package_eskd(
+        self, mcp_server, mock_adapter, mock_config, tmp_path: Path
+    ) -> None:
+        await register_drawing_automation_tools(mcp_server, mock_adapter, mock_config)
+        model = tmp_path / "Plate.SLDPRT"
+        model.write_bytes(b"")
+
+        result = await (await _tool(mcp_server, "generate_drawing_package"))(
+            {
+                "model_path": str(model),
+                "standard": "ЕСКД",
+                "sheet_size": "a4",
+                "sheet_format": "Frame A4.slddrt",
+                "title_block_fields": {"title": "Name"},
+            }
+        )
+
+        data = result["data"]
+        assert result["status"] == "success"
+        assert (data["standard"], data["sheet_size"]) == ("ESKD", "A4")
+        assert data["projection"] == "first_angle"
+        assert data["notes"][0] == "Технические требования"
+
+    @pytest.mark.asyncio
+    async def test_the_standard_options_reach_the_adapter(
+        self, mcp_server, mock_config
+    ) -> None:
+        seen: list[tuple] = []
+
+        async def create_standard_drawing(*args):
+            seen.append(args)
+            return AdapterResult(status=AdapterResultStatus.SUCCESS, data={})
+
+        adapter = SimpleNamespace(create_standard_drawing=create_standard_drawing)
+        await register_drawing_automation_tools(mcp_server, adapter, mock_config)
+
+        await (await _tool(mcp_server, "generate_drawing_package"))(
+            {
+                "model_path": "C:/parts/b.SLDPRT",
+                "standard": "ESKD",
+                "sheet_size": "A2",
+                "sheet_format": "C:/f/frame.slddrt",
+                "drafting_standard_file": "C:/s/MyStandard.sldstd",
+                "title_block_fields": {"title": "Name"},
+            }
+        )
+
+        assert seen[0][13:] == (
+            "ESKD",
+            "A2",
+            "C:/f/frame.slddrt",
+            "C:/s/MyStandard.sldstd",
+            {"title": "Name"},
+        )
+
+    @pytest.mark.asyncio
     async def test_remaining_overlaps_fail_the_package_with_data(
         self, mcp_server, mock_config
     ) -> None:
@@ -195,6 +251,24 @@ class TestDrawingPackageTools:
         (
             "generate_drawing_package",
             {"model_path": "C:/parts/b.SLDPRT", "title_block_text_height_mm": 0},
+            "views",
+            "invalid_input",
+        ),
+        (
+            "generate_drawing_package",
+            {"model_path": "C:/parts/b.SLDPRT", "standard": "DIN"},
+            "views",
+            "invalid_input",
+        ),
+        (
+            "generate_drawing_package",
+            {"model_path": "C:/parts/b.SLDPRT", "standard": "ESKD", "sheet_size": "B5"},
+            "views",
+            "invalid_input",
+        ),
+        (
+            "generate_drawing_package",
+            {"model_path": "C:/parts/b.SLDPRT", "title_block_fields": {"colour": "x"}},
             "views",
             "invalid_input",
         ),

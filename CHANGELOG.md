@@ -14,6 +14,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+ЕСКД (Russian unified system for design documentation) drawings from
+`generate_drawing_package`, selected with `standard="ESKD"`:
+
+- **Profiles** (`adapters/solidworks/drawing_profiles.py`): the sheet, frame,
+  title-block area, projection, scale series, captions and standard notes now
+  come from a `DrawingProfile` instead of module constants. `ISO` (A3, third
+  angle) stays the default and unchanged.
+- **ЕСКД profile, A4-A0**: first-angle projection (plan below the front, left
+  view to its right), the ГОСТ 2.302 scale series, a frame 20 mm from the left
+  edge and 5 mm elsewhere, the ГОСТ 2.104 form 1 title-block area (185 x 55 mm),
+  no captions on views in projection relation, and a "Технические требования"
+  block.
+- **New arguments**: `standard`, `sheet_size`, `sheet_format` (a `.slddrt`
+  path or file name; required for ЕСКД, which has no default),
+  `drafting_standard_file` (a `.sldstd` loaded into the drawing through
+  `IModelDocExtension.LoadDraftingStandard`) and `title_block_fields` (maps
+  the logical fields title, designation, material, mass, author, date,
+  revision, company onto the property names the sheet format reads).
+
+Not yet verified against a live SolidWorks: the ЕСКД sheet geometry, the
+default Russian property names and `LoadDraftingStandard`.
+
 Engineering-data tools, contributed by @SaiqKamran (#117) and signed off live
 against SolidWorks 2026:
 

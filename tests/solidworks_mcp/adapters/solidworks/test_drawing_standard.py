@@ -116,6 +116,157 @@ class TestSheetMaths:
         assert drawing == {"DrawnDate": "1 Jan 2026", "Revision": "A"}
 
 
+ESKD = std.get_profile("ESKD", "A3")
+
+
+class TestEskdSheetMaths:
+    PLATE = {"front": (0.12, 0.01), "plan": (0.12, 0.07), "side": (0.07, 0.01)}
+
+    def test_first_angle_grid_puts_the_plan_below_the_front(self) -> None:
+        cells = std.plan_cells(self.PLATE, (1, 1), ESKD)
+        assert cells is not None
+        assert cells["front"][3] == ESKD.view_zone[3]  # front in the top row
+        assert cells["plan"][1] == ESKD.view_zone[1]  # plan in the bottom row
+        assert cells["plan"][3] == cells["front"][1]
+        assert cells["side"][1] == cells["front"][1]  # beside the front
+        assert cells["side"][0] == cells["front"][2]
+        assert cells["iso"][0] == cells["plan"][2]
+        assert cells["notes"] == ESKD.notes_cell
+
+    def test_cells_fill_the_zone_and_do_not_overlap(self) -> None:
+        _, cells = std.choose_layout(self.PLATE, ESKD)
+        for name in ("front", "side", "plan", "iso"):
+            assert lay.inside(cells[name], ESKD.view_zone)
+            assert not lay.box_overlap(cells[name], ESKD.title_block, -1e-9)
+        names = ["front", "side", "plan", "iso", "notes"]
+        for i, a in enumerate(names):
+            for b in names[i + 1 :]:
+                assert not lay.box_overlap(cells[a], cells[b], -1e-9), (a, b)
+
+    def test_only_gost_scales_are_chosen(self) -> None:
+        scale, _ = std.choose_layout(self.PLATE, ESKD)
+        assert scale in ESKD.scales
+        tiny = {"front": (0.001, 0.001), "plan": (0.001, 0.001), "side": (0.001, 0.001)}
+        assert std.choose_layout(tiny, ESKD)[0] == (50, 1)
+        assert std.choose_layout(tiny)[0] == (5, 1)  # ISO tops out at 5:1
+
+    def test_no_room_is_reserved_for_captions(self) -> None:
+        assert std.content_box((0, 0, 1, 1), ESKD) == (0, 0, 1, 1)
+
+    def test_a_part_too_big_gets_the_smallest_scale_and_the_default_cells(self) -> None:
+        scale, cells = std.choose_layout({"front": (10000.0, 10000.0)}, ESKD)
+        assert scale == (1, 1000)
+        assert cells == ESKD.cells
+
+    def test_the_isometric_fits_a_gost_scale(self) -> None:
+        _, cells = std.choose_layout(self.PLATE, ESKD)
+        assert std.iso_fit_scale((0.15, 0.09), cells["iso"], ESKD) in ESKD.scales
+        assert std.iso_fit_scale((10000.0, 10000.0), cells["iso"], ESKD) == (1, 1000)
+
+    def test_eskd_title_block_properties(self) -> None:
+        model, drawing = std.title_block_properties(
+            model_file=r"C:\parts\Пластина.SLDPRT",
+            title="Пластина",
+            author="Иванов",
+            drawn_date="17.10.2026",
+            revision="",
+            company="",
+            profile=ESKD,
+            designation="АБВГ.123456.001",
+        )
+        assert model == {
+            "Наименование": "Пластина",
+            "Обозначение": "АБВГ.123456.001",
+            "Материал": '"SW-Material@Пластина.SLDPRT"',
+            "Масса": '"SW-Mass@Пластина.SLDPRT"',
+        }
+        assert drawing == {
+            "Обозначение": "АБВГ.123456.001",
+            "Разработал": "Иванов",
+            "Дата": "17.10.2026",
+        }
+
+    def test_the_designation_is_left_out_when_there_is_none(self) -> None:
+        model, drawing = std.title_block_properties(
+            model_file="a.SLDPRT",
+            title="A",
+            author="",
+            drawn_date="1.1.2026",
+            revision="",
+            company="",
+            profile=ESKD,
+        )
+        assert "Обозначение" not in model and "Обозначение" not in drawing
+
+    def test_property_names_can_be_replaced(self) -> None:
+        names = std.merge_property_names(ESKD, {"title": "Name", "designation": "Code"})
+        model, drawing = std.title_block_properties(
+            model_file="a.SLDPRT",
+            title="Plate",
+            author="",
+            drawn_date="1.1.2026",
+            revision="",
+            company="",
+            profile=ESKD,
+            names=names,
+            designation="X-1",
+        )
+        assert model["Name"] == "Plate" and model["Code"] == "X-1"
+        assert drawing["Code"] == "X-1"
+
+
+class TestEskdNotes:
+    def test_the_heading_is_technical_requirements_and_text_is_not_uppercased(
+        self,
+    ) -> None:
+        lines = std.note_lines("Сталь 45", ["Покрытие Ц9"], ESKD)
+        assert lines[0] == "Технические требования"
+        assert (
+            lines[1]
+            == "1. Неуказанные предельные отклонения размеров по ГОСТ 30893.1-m."
+        )
+        assert lines[2] == "2. Острые кромки притупить."
+        assert lines[3] == "3. Покрытие Ц9"
+        assert len(lines) == 4  # the material is in the title block, not here
+
+    def test_blank_lines_are_dropped_and_the_block_stops_at_seven(self) -> None:
+        lines = std.note_lines(None, [f"Строка {i}" for i in range(9)] + ["  "], ESKD)
+        assert len(lines) == 1 + std.MAX_NOTE_LINES
+
+
+class TestEskdViewRoles:
+    FRONT = (0.1, 0.17, 0.16, 0.2)
+
+    def _roles(self, plan_y: float):
+        views = {"V1": 1, "V2": 2, "V3": 3}
+        outlines = {
+            "V1": self.FRONT,
+            "V2": (0.1, plan_y, 0.16, plan_y + 0.03),
+            "V3": (0.2, 0.17, 0.23, 0.2),
+        }
+        orient = {"V1": "*Front", "V2": "*Top", "V3": "*Left"}
+        return views, outlines, orient
+
+    def test_the_plan_lies_below_the_front(self) -> None:
+        roles = std.view_roles(*self._roles(0.1), ESKD)
+        assert roles == {"V1": "front", "V2": "plan", "V3": "side"}
+
+    def test_a_view_above_the_front_is_not_the_plan(self) -> None:
+        roles = std.view_roles(*self._roles(0.25), ESKD)
+        assert roles["V2"] == "side"
+
+
+class TestSheetFormatPath:
+    def test_a_full_path_is_used_as_given(self, tmp_path) -> None:
+        fmt = tmp_path / "Frame.slddrt"
+        fmt.write_bytes(b"")
+        assert std.find_sheet_format(SimpleNamespace(), str(fmt)) == str(fmt)
+
+    def test_a_full_path_that_does_not_exist_is_not_found(self, tmp_path) -> None:
+        missing = str(tmp_path / "nope.slddrt")
+        assert std.find_sheet_format(SimpleNamespace(), missing) is None
+
+
 class TestDoubleArray:
     def test_variant_on_windows(self, monkeypatch) -> None:
         fake_w32 = SimpleNamespace(VARIANT=lambda vt, values: ("VARIANT", vt, values))

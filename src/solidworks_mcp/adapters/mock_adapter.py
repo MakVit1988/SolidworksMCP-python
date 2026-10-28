@@ -29,6 +29,7 @@ from .base import (
     SolidWorksModel,
     SweepParameters,
 )
+from .solidworks.drawing_profiles import get_profile, merge_property_names
 from .solidworks.features import _AXIS_PLANE_PAIRS
 from .solidworks.io import _normalise_unit_system as _normalise_mock_unit_system
 from .solidworks.sketch import RELATION_NAME_MAP
@@ -3849,27 +3850,55 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         include_isometric: bool = True,
         write_model_properties: bool = True,
         title_block_text_height_mm: float | None = None,
+        standard: str = "ISO",
+        sheet_size: str = "A3",
+        sheet_format: str | None = None,
+        drafting_standard_file: str | None = None,
+        title_block_fields: dict[str, str] | None = None,
     ) -> AdapterResult[dict[str, Any]]:
-        """Mock standard A3 drawing: validates inputs, writes nothing to disk."""
+        """Mock standard drawing: validates inputs, writes nothing to disk."""
+        try:
+            profile = get_profile(standard, sheet_size)
+            merge_property_names(profile, title_block_fields)
+        except ValueError as exc:
+            return AdapterResult(status=AdapterResultStatus.ERROR, error=str(exc))
+        if not (sheet_format or profile.sheet_format_name):
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=(
+                    f"The {profile.name} profile has no default sheet format; "
+                    "pass sheet_format"
+                ),
+            )
+        if drafting_standard_file and not os.path.isfile(drafting_standard_file):
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Drafting standard file not found: {drafting_standard_file}",
+            )
         if not os.path.isfile(model_path):
             return AdapterResult(
                 status=AdapterResultStatus.ERROR,
                 error=f"Model file not found: {model_path}",
             )
         stem = os.path.splitext(os.path.basename(model_path))[0]
-        number = drawing_number or f"{stem.upper().replace(' ', '-')}-Rev{revision}-01"
+        number = drawing_number or (
+            f"{stem.upper().replace(' ', '-')}-Rev{revision}-01"
+            if profile.revision_in_number
+            else stem
+        )
         out_dir = output_dir or os.path.dirname(model_path)
+        roles = ["front", "plan", "side", *(["iso"] if include_isometric else [])]
         views = {
-            "Drawing View1": {"role": "front", "caption": "FRONT ELEVATION"},
-            "Drawing View2": {"role": "plan", "caption": "PLAN"},
-            "Drawing View3": {"role": "side", "caption": "SIDE ELEVATION"},
+            f"Drawing View{i}": {"role": role, "caption": profile.captions.get(role)}
+            for i, role in enumerate(roles, start=1)
         }
-        if include_isometric:
-            views["Drawing View4"] = {"role": "iso", "caption": "ISOMETRIC"}
         self._operation_count += 1
         return AdapterResult(
             status=AdapterResultStatus.SUCCESS,
             data={
+                "standard": profile.name,
+                "sheet_size": profile.sheet.name,
+                "projection": profile.projection,
                 "scale": "1:1",
                 "isometric_scale": "1:1" if include_isometric else None,
                 "views": views,
@@ -3883,7 +3912,13 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                     else {},
                     "drawing": {"DrawnBy": author, "Revision": revision},
                 },
-                "notes": ["NOTES", *[n.upper() for n in (notes or [])]],
+                "notes": [
+                    profile.notes_heading,
+                    *[
+                        n.upper() if profile.uppercase_notes else n
+                        for n in (notes or [])
+                    ],
+                ],
                 "title_block": {
                     "drawing number": {"found": True, "fits": True},
                     "title": {"found": True, "fits": True},

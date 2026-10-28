@@ -1518,8 +1518,13 @@ class ConnectionPoolAdapter(SolidWorksAdapter):
         include_isometric: bool = True,
         write_model_properties: bool = True,
         title_block_text_height_mm: float | None = None,
+        standard: str = "ISO",
+        sheet_size: str = "A3",
+        sheet_format: str | None = None,
+        drafting_standard_file: str | None = None,
+        title_block_fields: dict[str, str] | None = None,
     ) -> AdapterResult[dict[str, Any]]:
-        """Create a complete standard A3 drawing using pool."""
+        """Create a complete standard drawing using pool."""
         return await self._execute_with_pool(
             "create_standard_drawing",
             lambda adapter: adapter.create_standard_drawing(
@@ -1536,6 +1541,11 @@ class ConnectionPoolAdapter(SolidWorksAdapter):
                 include_isometric,
                 write_model_properties,
                 title_block_text_height_mm,
+                standard,
+                sheet_size,
+                sheet_format,
+                drafting_standard_file,
+                title_block_fields,
             ),
         )
 

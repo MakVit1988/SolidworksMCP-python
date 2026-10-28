@@ -1853,8 +1853,13 @@ class CircuitBreakerAdapter(SolidWorksAdapter):
         include_isometric: bool = True,
         write_model_properties: bool = True,
         title_block_text_height_mm: float | None = None,
+        standard: str = "ISO",
+        sheet_size: str = "A3",
+        sheet_format: str | None = None,
+        drafting_standard_file: str | None = None,
+        title_block_fields: dict[str, str] | None = None,
     ) -> AdapterResult[dict[str, Any]]:
-        """Create a complete standard A3 drawing through circuit breaker."""
+        """Create a complete standard drawing through circuit breaker."""
         return await self._execute_with_circuit_breaker(
             "create_standard_drawing",
             lambda: self.adapter.create_standard_drawing(
@@ -1871,6 +1876,11 @@ class CircuitBreakerAdapter(SolidWorksAdapter):
                 include_isometric,
                 write_model_properties,
                 title_block_text_height_mm,
+                standard,
+                sheet_size,
+                sheet_format,
+                drafting_standard_file,
+                title_block_fields,
             ),
             input_dict={
                 "model_path": model_path,
@@ -1886,6 +1896,11 @@ class CircuitBreakerAdapter(SolidWorksAdapter):
                 "include_isometric": include_isometric,
                 "write_model_properties": write_model_properties,
                 "title_block_text_height_mm": title_block_text_height_mm,
+                "standard": standard,
+                "sheet_size": sheet_size,
+                "sheet_format": sheet_format,
+                "drafting_standard_file": drafting_standard_file,
+                "title_block_fields": title_block_fields,
             },
         )
 

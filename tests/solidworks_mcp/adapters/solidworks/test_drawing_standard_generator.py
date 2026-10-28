@@ -12,6 +12,7 @@ have their own tests.
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import Any
 
@@ -221,6 +222,8 @@ class _Drawing:
         for note, after in zip(self.format_notes, self.format_notes[1:], strict=False):
             note.next = after
         self.editing = "sheet"
+        self.loaded_standard: str | None = None
+        self.loads_standard = True
 
     def EditTemplate(self):  # noqa: N802
         self.editing = "format"
@@ -252,6 +255,23 @@ class _Drawing:
         self.views["Drawing View2"] = _View((0.1, 0.17, 0.16, 0.2), "*Top")
         self.views["Drawing View3"] = _View((0.2, 0.1, 0.23, 0.13), "*Right")
         return True
+
+    def Create1stAngleViews2(self, _path):  # noqa: N802
+        if self.make == "none":
+            return False
+        # First angle: the plan lies below the front, the left view beside it.
+        self.views["Drawing View1"] = _View((0.1, 0.17, 0.16, 0.2), "*Front")
+        self.views["Drawing View2"] = _View((0.1, 0.1, 0.16, 0.13), "*Top")
+        self.views["Drawing View3"] = _View((0.2, 0.17, 0.23, 0.2), "*Left")
+        return True
+
+    @property
+    def Extension(self):  # noqa: N802
+        return SimpleNamespace(LoadDraftingStandard=self._load_standard)
+
+    def _load_standard(self, path):
+        self.loaded_standard = path
+        return self.loads_standard
 
     def CreateDrawViewFromModelView3(self, *_args):  # noqa: N802
         if self.make != "no iso":
@@ -592,7 +612,7 @@ async def test_the_sheet_and_views_follow_the_standard(files) -> None:
 
     result = await adapter.create_standard_drawing(files.part)
 
-    assert drawing.setup[1:3] == (std._SW_PAPER_A3, std._SW_TEMPLATE_CUSTOM)
+    assert drawing.setup[1:3] == (std.ISO_A3.sheet.paper, std._SW_TEMPLATE_CUSTOM)
     assert drawing.setup[7:9] == std.SHEET_SIZE
     assert drawing.preferences == {
         std._SW_DETAILING_DIM_TRAILING_ZERO: std._SW_DIM_REMOVE_TRAILING_ZEROES
@@ -924,3 +944,291 @@ def test_an_unreadable_prompt_toggle_is_left_alone(files) -> None:
     app.prompt = "unchanged"
     adapter._restore_dialog(None)
     assert app.prompt == "unchanged"
+
+
+# ---- the ЕСКД profile ------------------------------------------------------------
+
+
+def _eskd_title_block(number: str = "АБВГ.123456.001") -> list[_FormatNote]:
+    """A Russian title block: the обозначение and наименование fields."""
+    return [
+        _FormatNote("Обозначение", "", 0.249, 0.028, 0.002),
+        _FormatNote(number, '$PRP:"Обозначение"', 0.25, 0.02, 0.007),
+        _FormatNote("Лист", "", 0.39, 0.021, 0.005),
+        _FormatNote("Пластина", '$PRPSHEET:"Наименование"', 0.23, 0.045, 0.005),
+    ]
+
+
+@pytest.fixture
+def eskd_files(files, tmp_path):
+    """``files`` plus a sheet format and a drafting standard on disk."""
+    frame = tmp_path / "formats" / "Frame A3 form1.slddrt"
+    frame.write_bytes(b"")
+    standard = tmp_path / "MyStandard.sldstd"
+    standard.write_bytes(b"")
+    files.frame = str(frame)
+    files.standard = str(standard)
+    return files
+
+
+def _eskd(files, **kwargs: Any) -> dict[str, Any]:
+    return {
+        "standard": "ESKD",
+        "sheet_size": "A3",
+        "sheet_format": files.frame,
+        "output_dir": str(files.out),
+        **kwargs,
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_eskd_drawing_is_first_angle_on_the_gost_sheet(eskd_files) -> None:
+    drawing = _Drawing(format_notes=_eskd_title_block())
+    adapter = _adapter(eskd_files, drawing)
+
+    result = await adapter.create_standard_drawing(
+        eskd_files.part, author="Иванов", drawn_date="23.10.2026", **_eskd(eskd_files)
+    )
+
+    data = result.data
+    assert result.is_success, result.error
+    assert (data["standard"], data["sheet_size"]) == ("ESKD", "A3")
+    assert data["projection"] == "first_angle"
+    profile = std.get_profile("ESKD", "A3")
+    # SetupSheet5: paper, custom template, scales, first-angle flag, format, size.
+    assert drawing.setup[1:3] == (profile.sheet.paper, std._SW_TEMPLATE_CUSTOM)
+    assert drawing.setup[5] is True
+    assert drawing.setup[6] == eskd_files.frame
+    assert drawing.setup[7:9] == (0.420, 0.297)
+    assert data["scale"] in {std.scale_label(sc) for sc in profile.scales}
+    assert data["drawing_number"] == "Mounting Plate"
+    assert data["drawing_path"] == str(eskd_files.out / "Mounting Plate.SLDDRW")
+
+
+@pytest.mark.asyncio
+async def test_eskd_views_follow_first_angle_projection(eskd_files) -> None:
+    drawing = _Drawing(format_notes=_eskd_title_block())
+    adapter = _adapter(eskd_files, drawing)
+
+    result = await adapter.create_standard_drawing(eskd_files.part, **_eskd(eskd_files))
+
+    front, plan, side = (drawing.views[f"Drawing View{i}"]._position for i in (1, 2, 3))
+    assert plan[1] < front[1]  # the plan is below the front
+    assert plan[0] == pytest.approx(front[0])
+    assert side[0] > front[0]  # the left view is to its right
+    assert side[1] == pytest.approx(front[1])
+    assert [v["role"] for v in result.data["views"].values()] == [
+        "front",
+        "plan",
+        "side",
+        "iso",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_eskd_views_have_no_captions_and_notes_are_technical_requirements(
+    eskd_files,
+) -> None:
+    drawing = _Drawing(format_notes=_eskd_title_block())
+    adapter = _adapter(eskd_files, drawing)
+
+    result = await adapter.create_standard_drawing(
+        eskd_files.part, notes=["Покрытие Ц9"], **_eskd(eskd_files)
+    )
+
+    data = result.data
+    assert {v["caption"] for v in data["views"].values()} == {None}
+    assert data["notes"][0] == "Технические требования"
+    assert data["notes"][1].startswith("1. Неуказанные предельные отклонения")
+    assert data["notes"][-1] == "3. Покрытие Ц9"
+    assert not any(
+        "MATERIAL" in line for line in data["notes"]
+    )  # it is in the title block
+    # No caption notes, and nothing reserved for captions on the sheet.
+    assert [n.text for n in drawing.notes][0] == "Технические требования"
+    obstacles = next(c for c in adapter.calls if c[0] == "arrange" and c[1])[2]
+    assert obstacles == ("notes", "title block")
+
+
+@pytest.mark.asyncio
+async def test_eskd_title_block_properties_use_the_russian_names(eskd_files) -> None:
+    adapter = _adapter(eskd_files, _Drawing(format_notes=_eskd_title_block()))
+
+    result = await adapter.create_standard_drawing(
+        eskd_files.part,
+        drawing_number="АБВГ.123456.001",
+        title="Пластина",
+        author="Иванов",
+        company="ООО Ромашка",
+        drawn_date="23.10.2026",
+        **_eskd(eskd_files),
+    )
+
+    written = result.data["properties_written"]
+    assert written["model"] == {
+        "Наименование": "Пластина",
+        "Обозначение": "АБВГ.123456.001",
+        "Материал": '"SW-Material@Mounting Plate.SLDPRT"',
+        "Масса": '"SW-Mass@Mounting Plate.SLDPRT"',
+    }
+    assert written["drawing"] == {
+        "Обозначение": "АБВГ.123456.001",
+        "Разработал": "Иванов",
+        "Дата": "23.10.2026",
+        "Изм.": "A",
+        "Организация": "ООО Ромашка",
+    }
+    assert result.data["drawing_number"] == "АБВГ.123456.001"
+    assert set(result.data["title_block"]) == {"drawing number", "title"}
+    assert all(f["found"] for f in result.data["title_block"].values())
+
+
+@pytest.mark.asyncio
+async def test_eskd_title_block_fields_can_be_renamed(eskd_files) -> None:
+    notes = [
+        _FormatNote("Код", '$PRP:"Code"', 0.25, 0.02, 0.003),
+        _FormatNote("Название", '$PRPSHEET:"Name"', 0.23, 0.045, 0.003),
+    ]
+    adapter = _adapter(eskd_files, _Drawing(format_notes=notes))
+
+    result = await adapter.create_standard_drawing(
+        eskd_files.part,
+        **_eskd(
+            eskd_files, title_block_fields={"designation": "Code", "title": "Name"}
+        ),
+    )
+
+    assert result.is_success, result.error
+    assert "Name" in result.data["properties_written"]["model"]
+    assert "Code" in result.data["properties_written"]["model"]
+    assert all(f["found"] for f in result.data["title_block"].values())
+
+
+@pytest.mark.asyncio
+async def test_eskd_needs_a_sheet_format(eskd_files) -> None:
+    adapter = _adapter(eskd_files)
+
+    result = await adapter.create_standard_drawing(
+        eskd_files.part, standard="ESKD", sheet_size="A3"
+    )
+
+    assert not result.is_success
+    assert "no default sheet format" in result.error
+    assert "sheet_format" in result.error
+
+
+@pytest.mark.asyncio
+async def test_a_sheet_format_name_is_looked_up_in_the_folders(eskd_files) -> None:
+    drawing = _Drawing(format_notes=_eskd_title_block())
+    adapter = _adapter(eskd_files, drawing)
+
+    result = await adapter.create_standard_drawing(
+        eskd_files.part,
+        standard="ESKD",
+        sheet_format="Frame A3 form1.slddrt",
+        output_dir=str(eskd_files.out),
+    )
+
+    assert result.is_success, result.error
+    assert drawing.setup[6] == os.path.join(eskd_files.formats, "Frame A3 form1.slddrt")
+
+
+@pytest.mark.asyncio
+async def test_a_missing_named_sheet_format_is_reported(eskd_files) -> None:
+    adapter = _adapter(eskd_files)
+
+    result = await adapter.create_standard_drawing(
+        eskd_files.part, standard="ESKD", sheet_format="Nope.slddrt"
+    )
+
+    assert not result.is_success
+    assert "Sheet format 'Nope.slddrt' not found" in result.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"standard": "DIN"}, "Unknown drawing standard 'DIN'"),
+        ({"standard": "ESKD", "sheet_size": "B5"}, "not available for ESKD"),
+        ({"standard": "ISO", "sheet_size": "A2"}, "only offers sheet size A3"),
+        ({"title_block_fields": {"colour": "x"}}, "Unknown title-block field"),
+    ],
+)
+async def test_an_unknown_standard_size_or_field_is_an_error(
+    eskd_files, kwargs, message
+) -> None:
+    adapter = _adapter(eskd_files)
+
+    result = await adapter.create_standard_drawing(eskd_files.part, **kwargs)
+
+    assert not result.is_success
+    assert message in result.error
+    assert adapter.calls == []  # nothing was opened or written
+
+
+@pytest.mark.asyncio
+async def test_a_drafting_standard_is_loaded_before_the_sheet_is_built(
+    eskd_files,
+) -> None:
+    drawing = _Drawing(format_notes=_eskd_title_block())
+    adapter = _adapter(eskd_files, drawing)
+
+    result = await adapter.create_standard_drawing(
+        eskd_files.part,
+        **_eskd(eskd_files, drafting_standard_file=eskd_files.standard),
+    )
+
+    assert result.is_success, result.error
+    assert drawing.loaded_standard == eskd_files.standard
+    steps = [s["step"] for s in result.data["steps"]]
+    assert steps.index("drafting_standard") < steps.index("build_sheet")
+    assert adapter.operations.index(
+        "standard_drawing_drafting_standard"
+    ) < adapter.operations.index("standard_drawing_sheet")
+
+
+@pytest.mark.asyncio
+async def test_a_drafting_standard_that_does_not_load_stops_the_build(
+    eskd_files,
+) -> None:
+    drawing = _Drawing(format_notes=_eskd_title_block())
+    drawing.loads_standard = False
+    adapter = _adapter(eskd_files, drawing)
+
+    result = await adapter.create_standard_drawing(
+        eskd_files.part,
+        **_eskd(eskd_files, drafting_standard_file=eskd_files.standard),
+    )
+
+    assert not result.is_success
+    assert "Could not load the drafting standard" in result.error
+    assert "Overall drafting standard" in result.error
+    assert not hasattr(drawing, "setup")  # the sheet was never set up
+
+
+@pytest.mark.asyncio
+async def test_a_missing_drafting_standard_file_is_reported_first(eskd_files) -> None:
+    adapter = _adapter(eskd_files)
+
+    result = await adapter.create_standard_drawing(
+        eskd_files.part,
+        **_eskd(eskd_files, drafting_standard_file="C:/nope/MyStandard.sldstd"),
+    )
+
+    assert not result.is_success
+    assert "Drafting standard file not found" in result.error
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_iso_is_still_the_default_standard(files) -> None:
+    drawing = _Drawing()
+    adapter = _adapter(files, drawing)
+
+    result = await adapter.create_standard_drawing(files.part)
+
+    assert result.data["standard"] == "ISO"
+    assert result.data["projection"] == "third_angle"
+    assert drawing.setup[5] is False
+    assert drawing.setup[6].endswith("a3 - iso.slddrt")

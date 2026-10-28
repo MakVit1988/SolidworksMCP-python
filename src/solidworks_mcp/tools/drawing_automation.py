@@ -10,9 +10,10 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastmcp import FastMCP
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from ..adapters.base import SolidWorksAdapter
+from ..adapters.solidworks.drawing_profiles import get_profile, merge_property_names
 from .input_compat import CompatInput
 from .tool_boundary import (
     normalize_input,
@@ -107,6 +108,11 @@ class GenerateDrawingPackageInput(CompatInput):
         include_isometric (bool): Add the isometric view.
         write_model_properties (bool): Write title-block properties into the model.
         title_block_text_height_mm (float | None): Cap on DWG NO./TITLE text height.
+        standard (str): Drafting standard, ``ISO`` or ``ESKD`` (ЕСКД).
+        sheet_size (str): Paper size; ``A3`` for ISO, ``A4``-``A0`` for ESKD.
+        sheet_format (str | None): The ``.slddrt`` to use, as a path or file name.
+        drafting_standard_file (str | None): A ``.sldstd`` to load into the drawing.
+        title_block_fields (dict[str, str] | None): Field -> property name overrides.
     """
 
     model_path: str = Field(description="Full path to the .SLDPRT or .SLDASM")
@@ -144,6 +150,32 @@ class GenerateDrawingPackageInput(CompatInput):
         "TITLE, e.g. 3 for smaller text. By default they keep the sheet "
         "format's height and are only shrunk to fit their boxes.",
     )
+    standard: str = Field(
+        default="ISO",
+        description="Drafting standard: ISO (A3, third-angle) or ESKD (ЕСКД: "
+        "first-angle projection, ГОСТ 2.302 scales, ГОСТ 2.104 title block)",
+    )
+    sheet_size: str = Field(
+        default="A3",
+        description="Paper size: A3 for ISO; A4, A3, A2, A1 or A0 for ESKD",
+    )
+    sheet_format: str | None = Field(
+        default=None,
+        description="Sheet format (.slddrt) with the title block: a full path, "
+        "or a file name from SolidWorks' sheet format folders. ISO defaults "
+        "to 'a3 - iso.slddrt'; ESKD needs one.",
+    )
+    drafting_standard_file: str | None = Field(
+        default=None,
+        description="Full path of a .sldstd drafting standard to load into the "
+        "new drawing before it is built (fonts, arrows, line styles)",
+    )
+    title_block_fields: dict[str, str] | None = Field(
+        default=None,
+        description="Property names the sheet format reads, when they differ "
+        "from the standard's: any of title, designation, material, mass, "
+        'author, date, revision, company, e.g. {"title": "Name"}',
+    )
 
     @field_validator("model_path")
     @classmethod
@@ -154,6 +186,13 @@ class GenerateDrawingPackageInput(CompatInput):
                 "model_path must be a part (.SLDPRT) or assembly (.SLDASM)"
             )
         return value
+
+    @model_validator(mode="after")
+    def _known_standard(self) -> GenerateDrawingPackageInput:
+        """The standard, its paper size and the field names must exist."""
+        profile = get_profile(self.standard, self.sheet_size)
+        merge_property_names(profile, self.title_block_fields)
+        return self
 
 
 async def register_drawing_automation_tools(
@@ -349,14 +388,25 @@ async def register_drawing_automation_tools(
     async def generate_drawing_package(
         input_data: GenerateDrawingPackageInput | None = None,
     ) -> dict[str, Any]:
-        """Create a complete A3 drawing of a part or assembly in one call.
+        """Create a complete drawing of a part or assembly in one call.
 
-        A3 ISO frame with a filled title block (title, drawing number, material,
-        weight, drawn by/date, revision); front, plan, side and isometric views
-        in cells sized to fill the sheet at one standard scale (never stepped
-        down); model dimensions shown once and laid out in rows; bold view-name
-        captions; a NOTES block; nothing overlapping, checked on the read-back
-        geometry. Saves ``<drawing_number>.SLDDRW`` and a PDF.
+        Sheet frame and title block from a sheet format, filled from the model
+        (title, drawing number, material, weight, drawn by/date, revision);
+        front, plan, side and isometric views in cells sized to fill the sheet
+        at one standard scale (never stepped down); model dimensions shown
+        once and laid out in rows; a notes block; nothing overlapping, checked
+        on the read-back geometry. Saves ``<drawing_number>.SLDDRW`` and a PDF.
+
+        Two standards: ``ISO`` (default) is A3, third-angle projection, bold
+        view-name captions and a NOTES block. ``ESKD`` (ЕСКД) is A4-A0, first-
+        angle projection (plan below the front, left view to its right), the
+        ГОСТ 2.302 scale series, no captions on views in projection relation,
+        and a "Технические требования" block. ESKD needs ``sheet_format``: the
+        ``.slddrt`` that carries the ГОСТ 2.104 title block. If its title-block
+        fields read other custom properties than the defaults (Наименование,
+        Обозначение, Материал, Масса, Разработал, Дата, Организация), name
+        them in ``title_block_fields``. ``drafting_standard_file`` loads a
+        ``.sldstd`` (fonts, arrows, line styles) into the drawing first.
 
         The DWG NO. and TITLE are shrunk to fit their title-block boxes. For
         smaller title-block text, pass ``title_block_text_height_mm`` (e.g.
@@ -388,6 +438,14 @@ async def register_drawing_automation_tools(
                 "model_path": "C:/parts/Mounting Plate.SLDPRT",
                 "title_block_text_height_mm": 3,
             })
+            # ЕСКД, A3, with the company's title block and drafting standard:
+            await generate_drawing_package({
+                "model_path": "C:/parts/Plate.SLDPRT",
+                "standard": "ESKD",
+                "sheet_size": "A3",
+                "sheet_format": "C:/Templates/Frame A3 form1.slddrt",
+                "drafting_standard_file": "C:/Templates/MyStandard.sldstd",
+            })
             ```
         """
         require_capability(
@@ -411,6 +469,11 @@ async def register_drawing_automation_tools(
             input_data.include_isometric,
             input_data.write_model_properties,
             input_data.title_block_text_height_mm,
+            input_data.standard,
+            input_data.sheet_size,
+            input_data.sheet_format,
+            input_data.drafting_standard_file,
+            input_data.title_block_fields,
         )
         require_success(
             result, context="Failed to create the standard drawing", with_data=True

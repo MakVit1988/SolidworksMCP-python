@@ -100,3 +100,50 @@ async def test_standard_drawing_missing_model(tmp_path) -> None:
     result = await MockSolidWorksAdapter({}).create_standard_drawing(missing)
 
     assert result.error == f"Model file not found: {missing}"
+
+
+@pytest.mark.asyncio
+async def test_standard_drawing_eskd(tmp_path) -> None:
+    adapter = MockSolidWorksAdapter({})
+    model = tmp_path / "Plate.SLDPRT"
+    model.write_bytes(b"")
+    fmt = tmp_path / "frame.slddrt"
+    fmt.write_bytes(b"")
+
+    result = await adapter.create_standard_drawing(
+        str(model),
+        notes=["Покрытие Ц9"],
+        standard="ESKD",
+        sheet_size="A2",
+        sheet_format=str(fmt),
+    )
+
+    data = result.data
+    assert (data["standard"], data["sheet_size"]) == ("ESKD", "A2")
+    assert data["projection"] == "first_angle"
+    assert data["drawing_number"] == "Plate"
+    assert {v["caption"] for v in data["views"].values()} == {None}
+    assert data["notes"] == ["Технические требования", "Покрытие Ц9"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"standard": "DIN"}, "Unknown drawing standard"),
+        ({"standard": "ESKD", "sheet_size": "B5"}, "not available for ESKD"),
+        ({"standard": "ESKD"}, "no default sheet format"),
+        ({"title_block_fields": {"x": "y"}}, "Unknown title-block field"),
+        ({"drafting_standard_file": "C:/no/such.sldstd"}, "not found"),
+    ],
+)
+async def test_standard_drawing_rejects_bad_options(tmp_path, kwargs, message) -> None:
+    model = tmp_path / "Plate.SLDPRT"
+    model.write_bytes(b"")
+
+    result = await MockSolidWorksAdapter({}).create_standard_drawing(
+        str(model), **kwargs
+    )
+
+    assert not result.is_success
+    assert message in result.error

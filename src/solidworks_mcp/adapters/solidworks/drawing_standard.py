@@ -1,6 +1,10 @@
-"""Standard A3 drawing generation for the PyWin32 adapter.
+"""Standard drawing generation for the PyWin32 adapter.
 
-Implements an A3 ISO drafting standard on SolidWorks:
+Implements the drafting standards of ``drawing_profiles.py`` (ISO A3, and
+ЕСКД on A4-A0) on SolidWorks. The description below is of the ISO A3
+profile, which is the default; ЕСКД differs in its first-angle projection,
+its ГОСТ 2.302 scales, its frame (20 mm left, 5 mm elsewhere), uncaptioned
+views and its "Технические требования" block:
 
 * **Sheet** - A3 landscape 420 x 297 mm with the SolidWorks ``a3 - iso``
   sheet format (zoned border, ISO title block). Working area x 15-405,
@@ -43,6 +47,14 @@ from typing import TYPE_CHECKING, Any, cast
 
 from ..base import AdapterResult, AdapterResultStatus
 from . import dimension_layout as _layout
+from .drawing_profiles import (
+    DRAWING_FIELD_KEYS,
+    ISO_A3,
+    DrawingProfile,
+    fit_fields,
+    get_profile,
+    merge_property_names,
+)
 from .io import _as_com, _resolve_drawing_view, _sw_type_info, _view_names
 
 if TYPE_CHECKING:
@@ -50,33 +62,18 @@ if TYPE_CHECKING:
 
 Box = tuple[float, float, float, float]
 
-#: Standard scales from the drawing standard, largest first, as (num, den).
-STANDARD_SCALES: list[tuple[float, float]] = [
-    (5, 1), (4, 1), (3, 1), (2.5, 1), (2, 1), (1.5, 1), (1, 1),
-    (1, 2), (1, 2.5), (1, 4), (1, 5), (1, 7.5), (1, 10), (1, 12.5),
-    (1, 15), (1, 20), (1, 25), (1, 30), (1, 40), (1, 50), (1, 60),
-    (1, 75), (1, 100),
-]  # fmt: skip
+#: The ISO A3 profile's values, kept as module names for callers and tests.
+#: The generator itself reads the profile it was given.
+STANDARD_SCALES: list[tuple[float, float]] = list(ISO_A3.scales)
 
-SHEET_SIZE = (0.420, 0.297)
-WORK_AREA: Box = (0.015, 0.015, 0.405, 0.282)
-TITLE_BLOCK: Box = (0.218, 0.008, 0.412, 0.072)
+SHEET_SIZE = (ISO_A3.sheet.width, ISO_A3.sheet.height)
+WORK_AREA: Box = ISO_A3.work_area
+TITLE_BLOCK: Box = ISO_A3.title_block
 #: Cells (x0, y0, x1, y1) in metres. Third-angle: plan above front, side right.
-CELLS: dict[str, Box] = {
-    "front": (0.015, 0.075, 0.215, 0.178),
-    "side": (0.215, 0.075, 0.405, 0.178),
-    "plan": (0.015, 0.178, 0.215, 0.282),
-    "iso": (0.215, 0.178, 0.405, 0.282),
-    "notes": (0.015, 0.015, 0.215, 0.075),
-}
-CAPTIONS = {
-    "front": "FRONT ELEVATION",
-    "plan": "PLAN",
-    "side": "SIDE ELEVATION",
-    "iso": "ISOMETRIC",
-}
+CELLS: dict[str, Box] = ISO_A3.cells
+CAPTIONS = dict(ISO_A3.captions)
 #: Caption strip at the bottom of every view cell.
-CAPTION_STRIP = 0.009
+CAPTION_STRIP = ISO_A3.caption_strip
 CAPTION_HEIGHT = 0.0032
 NOTE_HEIGHT = 0.003
 
@@ -85,8 +82,7 @@ _SW_SHOW_SHEET_FORMAT_DIALOG = 353
 _SW_DETAILING_DIM_TRAILING_ZERO = 15
 _SW_DIM_REMOVE_TRAILING_ZEROES = 2
 _SW_PREF_SHEET_FORMAT_FOLDER = 7
-# swDwgPaperSizes_e / swDwgTemplates_e
-_SW_PAPER_A3 = 8
+# swDwgTemplates_e
 _SW_TEMPLATE_CUSTOM = 12
 # swUserPreferenceStringValue_e / swBomType_e / swBOMConfigurationAnchorType_e /
 # swNumberingType_e (used by insert_bom_table)
@@ -123,13 +119,13 @@ def scale_label(scale: tuple[float, float]) -> str:
     return f"{scale[0]:g}:{scale[1]:g}"
 
 
-def content_box(cell: Box) -> Box:
+def content_box(cell: Box, profile: DrawingProfile = ISO_A3) -> Box:
     """The part of a view cell left after the caption strip."""
-    return (cell[0], cell[1] + CAPTION_STRIP, cell[2], cell[3])
+    return (cell[0], cell[1] + profile.caption_strip, cell[2], cell[3])
 
 
 #: Area for the four view cells: full width above the notes and title block.
-VIEW_ZONE: Box = (0.015, 0.075, 0.405, 0.282)
+VIEW_ZONE: Box = ISO_A3.view_zone
 #: Room for dimensions each side of a view when sizing cells: the first row
 #: (8 mm) plus one more row/column. The scale is chosen once from this fit and
 #: never stepped down; the real overlap check reports anything that remains.
@@ -139,19 +135,24 @@ ISO_MARGIN = 0.006
 
 
 def plan_cells(
-    sizes: dict[str, tuple[float, float]], scale: tuple[float, float]
+    sizes: dict[str, tuple[float, float]],
+    scale: tuple[float, float],
+    profile: DrawingProfile = ISO_A3,
 ) -> dict[str, Box] | None:
     """Size the four view cells for one part at one scale, or None if it won't fit.
 
     Third-angle grid: front bottom-left, side to its right, plan above the
-    front, isometric top-right. Column widths follow the part's width and
-    depth, row heights its height and depth; spare space is shared out evenly
-    so every view is centred with room around it.
+    front, isometric top-right. First-angle grid (ЕСКД): front top-left, side
+    to its right, plan below the front, isometric bottom-right. Column widths
+    follow the part's width and depth, row heights its height and depth;
+    spare space is shared out evenly so every view is centred with room
+    around it.
 
     Args:
         sizes: ``front`` (width, height), ``plan`` (width, depth) and/or
             ``side`` (depth, height), in model metres.
         scale: Sheet scale (num, den).
+        profile: The drafting standard; ISO A3 by default.
     """
     f = scale[0] / scale[1]
     front = sizes.get("front")
@@ -161,53 +162,67 @@ def plan_cells(
     depth = sizes["side"][0] if "side" in sizes else sizes.get("plan", (0.0, 0.0))[1]
     left = width * f + 2 * FIT_H_MARGIN
     right = depth * f + 2 * FIT_H_MARGIN
-    low = height * f + 2 * FIT_V_MARGIN + CAPTION_STRIP
-    high = depth * f + 2 * FIT_V_MARGIN + CAPTION_STRIP
-    zx0, zy0, zx1, zy1 = VIEW_ZONE
-    if left + right > zx1 - zx0 or low + high > zy1 - zy0:
+    strip = profile.caption_strip
+    front_row = height * f + 2 * FIT_V_MARGIN + strip
+    depth_row = depth * f + 2 * FIT_V_MARGIN + strip
+    zx0, zy0, zx1, zy1 = profile.view_zone
+    if left + right > zx1 - zx0 or front_row + depth_row > zy1 - zy0:
         return None
     xm = zx0 + left + (zx1 - zx0 - left - right) / 2
-    ym = zy0 + low + (zy1 - zy0 - low - high) / 2
+    spare = (zy1 - zy0 - front_row - depth_row) / 2
+    if profile.first_angle:
+        ym = zy1 - front_row - spare
+        return {
+            "front": (zx0, ym, xm, zy1),
+            "side": (xm, ym, zx1, zy1),
+            "plan": (zx0, zy0, xm, ym),
+            "iso": (xm, zy0, zx1, ym),
+            "notes": profile.notes_cell,
+        }
+    ym = zy0 + front_row + spare
     return {
         "front": (zx0, zy0, xm, ym),
         "side": (xm, zy0, zx1, ym),
         "plan": (zx0, ym, xm, zy1),
         "iso": (xm, ym, zx1, zy1),
-        "notes": CELLS["notes"],
+        "notes": profile.notes_cell,
     }
 
 
 def choose_layout(
-    sizes: dict[str, tuple[float, float]],
+    sizes: dict[str, tuple[float, float]], profile: DrawingProfile = ISO_A3
 ) -> tuple[tuple[float, float], dict[str, Box]]:
     """Largest standard scale whose cells fit, with those cells.
 
     Args:
         sizes: Model-space view sizes, as for :func:`plan_cells`.
+        profile: The drafting standard; its scale series is the one used.
 
     Returns:
         tuple: The scale (num, den) and the cells; the smallest standard scale
         (with default cells if even that does not fit) as a last resort.
     """
-    for scale in STANDARD_SCALES:
-        cells = plan_cells(sizes, scale)
+    for scale in profile.scales:
+        cells = plan_cells(sizes, scale, profile)
         if cells is not None:
             return scale, cells
-    last = STANDARD_SCALES[-1]
-    return last, plan_cells(sizes, last) or dict(CELLS)
+    last = profile.scales[-1]
+    return last, plan_cells(sizes, last, profile) or profile.cells
 
 
-def iso_fit_scale(size: tuple[float, float], cell: Box) -> tuple[float, float]:
+def iso_fit_scale(
+    size: tuple[float, float], cell: Box, profile: DrawingProfile = ISO_A3
+) -> tuple[float, float]:
     """Largest standard scale at which the isometric view fills its cell."""
-    area = content_box(cell)
-    for scale in STANDARD_SCALES:
+    area = content_box(cell, profile)
+    for scale in profile.scales:
         f = scale[0] / scale[1]
         if (
             size[0] * f + 2 * ISO_MARGIN <= area[2] - area[0]
             and size[1] * f + 2 * ISO_MARGIN <= area[3] - area[1]
         ):
             return scale
-    return STANDARD_SCALES[-1]
+    return profile.scales[-1]
 
 
 def title_block_properties(
@@ -219,36 +234,68 @@ def title_block_properties(
     revision: str,
     company: str,
     subtitle: str | None = None,
+    profile: DrawingProfile = ISO_A3,
+    names: dict[str, str] | None = None,
+    designation: str | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """Map the standard's title-block fields onto the ISO format's properties.
+    """Map the standard's title-block fields onto the sheet format's properties.
 
     The ``a3 - iso`` format reads TITLE, MATERIAL and WEIGHT from the model
     (``$PRPSHEET``) and DRAWN, REVISION and the company from the drawing
     (``$PRP``). Material and weight are links, so they always show the model's
-    real values.
+    real values. A profile with a ``designation`` property (ЕСКД) also gets
+    the drawing number there, on the model and on the drawing.
+
+    Args:
+        model_file: The model's path; its file name goes into the links.
+        title: The title (ЕСКД: наименование).
+        author: Who drew it.
+        drawn_date: The drawn date, already formatted.
+        revision: Revision mark.
+        company: Company name.
+        subtitle: Company field when ``company`` is empty.
+        profile: The drafting standard; ISO A3 by default.
+        names: Logical field -> the property name the caller's sheet format
+            reads, replacing the profile's.
+        designation: The drawing number (ЕСКД: обозначение).
 
     Returns:
         tuple: (model properties, drawing properties).
     """
     # SolidWorks paths are Windows paths, whatever platform this runs on.
     base = ntpath.basename(model_file)
-    description = title  # keep TITLE short so it fits the box (standard section 1)
+    props = names if names is not None else profile.property_names
+    values = {
+        "title": title,  # keep it short so it fits the box (standard section 1)
+        "designation": designation or "",
+        "material": f'"SW-Material@{base}"',
+        "mass": f'"SW-Mass@{base}"',
+        "author": author,
+        "date": drawn_date,
+        "revision": revision,
+        "company": company or (subtitle or ""),
+    }
     model_props = {
-        "Description": description,
-        "Material": f'"SW-Material@{base}"',
-        "Weight": f'"SW-Mass@{base}"',
+        props[k]: v
+        for k, v in values.items()
+        if k in props and k not in DRAWING_FIELD_KEYS and (v or k != "designation")
     }
     drawing_props = {
-        "DrawnBy": author,
-        "DrawnDate": drawn_date,
-        "Revision": revision,
-        "COMPANYNAME": company or (subtitle or ""),
+        props[k]: v
+        for k, v in values.items()
+        if k in props and v and (k in DRAWING_FIELD_KEYS or k == "designation")
     }
-    return model_props, {k: v for k, v in drawing_props.items() if v}
+    return model_props, drawing_props
 
 
 def find_sheet_format(adapter: Any, name: str = "a3 - iso.slddrt") -> str | None:
-    """Locate a sheet format file: SolidWorks' configured folder, then ProgramData."""
+    """Locate a sheet format file: SolidWorks' configured folder, then ProgramData.
+
+    ``name`` may also be the full path of a ``.slddrt``, which is used as given
+    when the file exists.
+    """
+    if os.path.isabs(name) or ntpath.isabs(name):
+        return name if os.path.isfile(name) else None
     app = getattr(adapter, "swApp", None)
     folders: list[str] = []
     if app is not None:
@@ -298,45 +345,57 @@ FIELD_HINT = (
 _SW_NOTE_OWN_FORMAT = 0
 
 #: Standard notes, after the material line.
-STANDARD_NOTES = (
-    "ALL DIMENSIONS IN MILLIMETRES",
-    "THIRD ANGLE PROJECTION",
-    "REMOVE ALL BURRS AND SHARP EDGES",
-)
+STANDARD_NOTES = ISO_A3.standard_notes
 
 #: Where the isometric view is first dropped, before it is moved to its cell.
 _ISO_DROP_POINT = (0.31, 0.23)
 
 
-def note_lines(material: str | None, extra: list[str] | None) -> list[str]:
-    """The NOTES block: a heading, then at most seven numbered lines.
+def note_lines(
+    material: str | None,
+    extra: list[str] | None,
+    profile: DrawingProfile = ISO_A3,
+) -> list[str]:
+    """The notes block: a heading, then at most seven numbered lines.
 
     Args:
-        material: The part's material, first when known.
+        material: The part's material, first when the profile lists it.
         extra: The caller's lines, after the standard ones.
+        profile: The drafting standard; ISO A3 by default.
 
     Returns:
-        list[str]: ``["NOTES", "1. ...", ...]`` in capitals.
+        list[str]: ``["NOTES", "1. ...", ...]`` in capitals for ISO;
+        ``["Технические требования", "1. ...", ...]`` as written for ЕСКД.
     """
-    body = [f"MATERIAL: {material.upper()}"] if material else []
-    body += list(STANDARD_NOTES)
-    body += [line.upper() for line in (extra or []) if line.strip()]
+    shape = str.upper if profile.uppercase_notes else str
+    body = (
+        [shape(f"MATERIAL: {material}")]
+        if material and profile.material_in_notes
+        else []
+    )
+    body += list(profile.standard_notes)
+    body += [shape(line.strip()) for line in (extra or []) if line.strip()]
     numbered = [f"{i}. {line}" for i, line in enumerate(body[:MAX_NOTE_LINES], start=1)]
-    return ["NOTES", *numbered]
+    return [profile.notes_heading, *numbered]
 
 
 def view_roles(
-    views: dict[str, Any], outlines: dict[str, Box | None], orientations: dict[str, str]
+    views: dict[str, Any],
+    outlines: dict[str, Box | None],
+    orientations: dict[str, str],
+    profile: DrawingProfile = ISO_A3,
 ) -> dict[str, str]:
     """Name each orthographic view's role: ``front``, ``plan`` or ``side``.
 
-    The front is the view whose orientation says "front" (else the first);
-    a view centred above the front is the plan, any other is the side.
+    The front is the view whose orientation says "front" (else the first).
+    In third-angle projection a view centred above the front is the plan; in
+    first-angle projection it is one centred below. Any other is the side.
 
     Args:
         views: View name -> ``IView``, in creation order.
         outlines: View name -> outline, ``None`` when unreadable.
         orientations: View name -> orientation name, e.g. ``*Front``.
+        profile: The drafting standard, which decides where the plan lies.
 
     Returns:
         dict[str, str]: View name -> role; a view whose outline is unknown
@@ -352,8 +411,9 @@ def view_roles(
         o = outlines.get(name)
         if name == front or o is None or fo is None:
             continue
-        above = (o[1] + o[3]) / 2 > (fo[1] + fo[3]) / 2 + 1e-4
-        role[name] = "plan" if above else "side"
+        offset = (o[1] + o[3]) / 2 - (fo[1] + fo[3]) / 2
+        is_plan = offset < -1e-4 if profile.first_angle else offset > 1e-4
+        role[name] = "plan" if is_plan else "side"
     return role
 
 
@@ -402,10 +462,14 @@ class _Sheet:
         note_lines: The NOTES block's text.
         title_block: Field name -> how it was fitted to its box.
         field_height: The caller's cap on the fitted fields' text height.
+        profile: The drafting standard the sheet follows.
+        names: Logical title-block field -> property name on the format.
     """
 
     path: str
     sheet_format: str
+    profile: DrawingProfile = ISO_A3
+    names: dict[str, str] = field(default_factory=dict)
     include_isometric: bool = True
     material: str | None = None
     extra_notes: list[str] = field(default_factory=list)
@@ -864,16 +928,25 @@ class SolidWorksDrawingStandardMixin:
 
     def _obstacles(self, s: _Sheet) -> dict[str, Box]:
         """What dimensions must keep clear of: title block, notes, captions."""
-        result: dict[str, Box] = {"title block": TITLE_BLOCK, "notes": s.cells["notes"]}
-        for r in s.role.values():
-            c = s.cells[r]
-            result[f"{r} caption"] = (c[0], c[1], c[2], c[1] + CAPTION_STRIP)
+        result: dict[str, Box] = {
+            "title block": s.profile.title_block,
+            "notes": s.cells["notes"],
+        }
+        if s.profile.caption_strip:
+            for r in s.role.values():
+                c = s.cells[r]
+                result[f"{r} caption"] = (
+                    c[0],
+                    c[1],
+                    c[2],
+                    c[1] + s.profile.caption_strip,
+                )
         return result
 
     # -- the generator's COM steps --------------------------------------
 
-    def _setup_a3_sheet(self, s: _Sheet) -> dict[str, Any]:
-        """Apply the A3 ISO sheet format and drop trailing zeros.
+    def _setup_sheet(self, s: _Sheet) -> dict[str, Any]:
+        """Apply the profile's paper size and sheet format, drop trailing zeros.
 
         Raises:
             RuntimeError: ``SetupSheet5`` refused the format.
@@ -884,14 +957,14 @@ class SolidWorksDrawingStandardMixin:
         sheet_name = self._attempt(lambda: sheet.GetName(), default="Sheet1")
         if not drawing.SetupSheet5(
             sheet_name,
-            _SW_PAPER_A3,
+            s.profile.sheet.paper,
             _SW_TEMPLATE_CUSTOM,
             1.0,
             1.0,
-            False,
+            s.profile.first_angle,
             s.sheet_format,
-            SHEET_SIZE[0],
-            SHEET_SIZE[1],
+            s.profile.sheet.width,
+            s.profile.sheet.height,
             "Default",
             True,
         ):
@@ -905,14 +978,21 @@ class SolidWorksDrawingStandardMixin:
         return {"sheet": sheet_name, "sheet_format": s.sheet_format}
 
     def _create_views(self, s: _Sheet) -> dict[str, Any]:
-        """Create the third-angle views, name their roles, add the isometric.
+        """Create the profile's orthographic views, name their roles, add the isometric.
 
         Raises:
             RuntimeError: No view could be made from the model.
         """
         drawing = self._drawing()
         before = set(_view_names(self, drawing))
-        self._attempt(lambda: drawing.Create3rdAngleViews2(s.path), default=False)
+        self._attempt(
+            lambda: (
+                drawing.Create1stAngleViews2(s.path)
+                if s.profile.first_angle
+                else drawing.Create3rdAngleViews2(s.path)
+            ),
+            default=False,
+        )
         s.ortho = [n for n in _view_names(self, drawing) if n not in before]
         if not s.ortho:
             raise RuntimeError(f"No views could be created from {s.path}")
@@ -922,7 +1002,7 @@ class SolidWorksDrawingStandardMixin:
             n: str(self._attempt(lambda v=v: v.GetOrientationName(), default="") or "")
             for n, v in s.views.items()
         }
-        s.role = view_roles(s.views, outlines, orientations)
+        s.role = view_roles(s.views, outlines, orientations, s.profile)
         if s.include_isometric:
             before_iso = set(_view_names(self, drawing))
             self._attempt(
@@ -958,21 +1038,21 @@ class SolidWorksDrawingStandardMixin:
         model = self.currentModel
         sizes = self._view_sizes(s)
         iso_size = sizes.pop("iso", None)
-        s.scale, s.cells = choose_layout(sizes)
+        s.scale, s.cells = choose_layout(sizes, s.profile)
         sheet = _as_com(self, self._drawing().GetCurrentSheet(), "ISheet")
         sheet.SetScale(float(s.scale[0]), float(s.scale[1]), True, False)
         self._attempt(lambda: model.EditRebuild3(), default=None)
         if s.iso_name and iso_size:
-            s.iso_scale = iso_fit_scale(iso_size, s.cells["iso"])
+            s.iso_scale = iso_fit_scale(iso_size, s.cells["iso"], s.profile)
             iso = s.views[s.iso_name]
             ratio = _double_array([float(s.iso_scale[0]), float(s.iso_scale[1])])
             self._attempt(lambda: setattr(iso, "UseSheetScale", False), default=None)
             self._attempt(lambda: setattr(iso, "ScaleRatio", ratio), default=None)
-        fc = content_box(s.cells["front"])
+        fc = content_box(s.cells["front"], s.profile)
         fcx, fcy = (fc[0] + fc[2]) / 2, (fc[1] + fc[3]) / 2
         placed = {}
         for n, r in sorted(s.role.items(), key=lambda item: item[1] != "front"):
-            c = content_box(s.cells[r])
+            c = content_box(s.cells[r], s.profile)
             x, y = (c[0] + c[2]) / 2, (c[1] + c[3]) / 2
             if r == "plan":
                 x = fcx
@@ -989,7 +1069,7 @@ class SolidWorksDrawingStandardMixin:
     def _dimension_views(self, s: _Sheet) -> dict[str, Any]:
         """Import the model dimensions and lay them out clear of everything."""
         dims = self._import_dimensions(None, True, only_views=list(s.ortho))
-        self._arrange_layout(None, self._obstacles(s), WORK_AREA)
+        self._arrange_layout(None, self._obstacles(s), s.profile.work_area)
         return dims
 
     def _annotate(self, s: _Sheet) -> dict[str, Any]:
@@ -1000,19 +1080,25 @@ class SolidWorksDrawingStandardMixin:
         """
         model = self.currentModel
         for n, r in s.role.items():
-            text = CAPTIONS[r]
+            text = s.profile.captions.get(r)
+            if not text:  # views in projection relation need no caption
+                continue
             c = s.cells[r]
             s.captions[n] = text
             an = self._insert_sheet_note(
-                text, c[0] + 0.01, c[1] + CAPTION_STRIP, CAPTION_HEIGHT, True
+                text,
+                c[0] + 0.01,
+                c[1] + s.profile.caption_strip,
+                CAPTION_HEIGHT,
+                True,
             )
             if an is not None:
                 self._place_note(
                     an, text, centre_x=(c[0] + c[2]) / 2, bottom=c[1] + 0.0015
                 )
                 s.notes.append((f"caption {r}", an))
-        s.note_lines = note_lines(s.material, s.extra_notes)
-        nc = CELLS["notes"]
+        s.note_lines = note_lines(s.material, s.extra_notes, s.profile)
+        nc = s.cells["notes"]
         top = nc[3] - 0.003
         for i, line in enumerate(s.note_lines):
             height = CAPTION_HEIGHT if i == 0 else NOTE_HEIGHT
@@ -1117,13 +1203,13 @@ class SolidWorksDrawingStandardMixin:
         self._attempt(lambda: drawing.EditTemplate(), default=None)
         try:
             notes = self._format_notes(drawing)
-            for prop, name in TITLE_BLOCK_FIELDS.items():
+            for prop, name in fit_fields(s.names).items():
                 match = next((n for n in notes if f'"{prop}"' in n[1]), None)
                 if match is None or match[2] is None:
                     s.title_block[name] = {"found": match is not None, "fits": None}
                     continue
                 others = [n[2] for n in notes if n is not match and n[2] is not None]
-                right = field_room(match[2], others, TITLE_BLOCK[2])
+                right = field_room(match[2], others, s.profile.title_block[2])
                 s.title_block[name] = {
                     "found": True,
                     **self._fit_field(match[0], right, s.field_height),
@@ -1135,7 +1221,10 @@ class SolidWorksDrawingStandardMixin:
 
     def _check_sheet(self, s: _Sheet) -> dict[str, Any]:
         """Check the finished sheet: dimensions, captions and notes, read back."""
-        final = self._arrange_layout(None, self._obstacles(s), WORK_AREA, move=False)
+        profile = s.profile
+        final = self._arrange_layout(
+            None, self._obstacles(s), profile.work_area, move=False
+        )
         drawing = self._drawing()
         outlines, dims, _ = self._collect_layout(drawing, _view_names(self, drawing))
         boxes = {
@@ -1143,13 +1232,35 @@ class SolidWorksDrawingStandardMixin:
             for label, an in s.notes
         }
         problems = _layout.find_annotation_overlaps(
-            boxes, dims, outlines, WORK_AREA, {"title block": TITLE_BLOCK}
+            boxes,
+            dims,
+            outlines,
+            profile.work_area,
+            {"title block": profile.title_block},
         )
         final["annotation_overlaps"] = problems
         final["overlaps_after"] = final.get("overlaps_after", 0) + len(problems)
         return final
 
     # -- the generator ----------------------------------------------------
+
+    def _load_drafting_standard(self, path: str) -> dict[str, Any]:
+        """Load a ``.sldstd`` drafting standard into the active drawing.
+
+        Wraps ``IModelDocExtension::LoadDraftingStandard``.
+
+        Raises:
+            RuntimeError: SolidWorks did not load the file.
+        """
+        ext = _as_com(self, self.currentModel.Extension, "IModelDocExtension")
+        loaded = self._attempt(lambda: ext.LoadDraftingStandard(path), default=None)
+        if not loaded:
+            raise RuntimeError(
+                f"SolidWorks did not load {path}. Load it by hand in "
+                "Tools > Options > Document Properties > Overall drafting "
+                "standard > Load"
+            )
+        return {"drafting_standard": path}
 
     def _new_drawing_without_dialog(self) -> bool | None:
         """Read and turn off the Sheet Format/Size prompt (pitfall #32).
@@ -1194,13 +1305,23 @@ class SolidWorksDrawingStandardMixin:
         include_isometric: bool = True,
         write_model_properties: bool = True,
         title_block_text_height_mm: float | None = None,
+        standard: str = "ISO",
+        sheet_size: str = "A3",
+        sheet_format: str | None = None,
+        drafting_standard_file: str | None = None,
+        title_block_fields: dict[str, str] | None = None,
     ) -> AdapterResult[dict[str, Any]]:
-        """Create a complete A3 drawing that follows the drawing standard.
+        """Create a complete drawing that follows a drafting standard.
 
         Opens the model (or uses its open copy), writes the title-block
-        properties into it, makes a drawing on the A3 ISO format, builds the
-        sheet in separate COM steps, writes the drawing properties, saves
-        ``<drawing_number>.SLDDRW`` and exports a PDF.
+        properties into it, makes a drawing on the standard's sheet format,
+        builds the sheet in separate COM steps, writes the drawing properties,
+        saves ``<drawing_number>.SLDDRW`` and exports a PDF.
+
+        ``standard="ISO"`` is the original A3 sheet in third-angle
+        projection. ``standard="ESKD"`` (ЕСКД) builds a first-angle drawing on
+        A4-A0 with the ГОСТ 2.302 scales, no view captions, and a
+        "Технические требования" block.
 
         Args:
             model_path: Part (.SLDPRT) or assembly (.SLDASM) to draw.
@@ -1221,6 +1342,18 @@ class SolidWorksDrawingStandardMixin:
             title_block_text_height_mm: Largest text height for the DWG NO.
                 and TITLE fields, e.g. 3 for smaller text; they are shrunk
                 further when they still do not fit.
+            standard: ``ISO`` (default) or ``ESKD``.
+            sheet_size: ``A3`` for ISO; ``A4``-``A0`` for ESKD.
+            sheet_format: The ``.slddrt`` to use: a full path, or a file name
+                looked up in SolidWorks' sheet format folders. ISO defaults to
+                ``a3 - iso.slddrt``; ESKD has no default and needs one (the
+                title block comes from it).
+            drafting_standard_file: A ``.sldstd`` file to load into the new
+                drawing (fonts, arrows, line styles) before it is built.
+            title_block_fields: Logical field -> the property name the sheet
+                format reads, for a format that does not use the standard's
+                names. Fields: title, designation, material, mass, author,
+                date, revision, company.
 
         Returns:
             AdapterResult[dict[str, Any]]: Files, scale, views, dimension
@@ -1228,6 +1361,27 @@ class SolidWorksDrawingStandardMixin:
             outcome. ERROR, with that data, when a step fails, the drawing or
             PDF could not be saved, or any overlap remains.
         """
+        try:
+            profile = get_profile(standard, sheet_size)
+            names = merge_property_names(profile, title_block_fields)
+        except ValueError as exc:
+            return AdapterResult(status=AdapterResultStatus.ERROR, error=str(exc))
+        format_name = sheet_format or profile.sheet_format_name
+        if not format_name:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=(
+                    f"The {profile.name} profile has no default sheet format; "
+                    "pass sheet_format (the .slddrt with its title block, as "
+                    "a full path or a file name from SolidWorks' sheet format "
+                    "folders)"
+                ),
+            )
+        if drafting_standard_file and not os.path.isfile(drafting_standard_file):
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Drafting standard file not found: {drafting_standard_file}",
+            )
         path = os.path.abspath(model_path)
         if not os.path.isfile(path):
             return AdapterResult(
@@ -1241,13 +1395,22 @@ class SolidWorksDrawingStandardMixin:
             )
         stem = os.path.splitext(os.path.basename(path))[0]
         rev = (revision or "A").strip()
-        number = drawing_number or f"{stem.upper().replace(' ', '-')}-Rev{rev}-01"
+        base_number = stem.upper().replace(" ", "-")
+        number = drawing_number or (
+            f"{base_number}-Rev{rev}-01" if profile.revision_in_number else stem
+        )
         out_dir = os.path.abspath(output_dir or os.path.dirname(path))
         drawing_path = os.path.join(out_dir, f"{number}.SLDDRW")
         pdf_path = os.path.join(out_dir, f"{number}.pdf")
         steps: list[dict[str, Any]] = []
         written: dict[str, dict[str, str]] = {}
-        data: dict[str, Any] = {"drawing_number": number, "steps": steps}
+        data: dict[str, Any] = {
+            "drawing_number": number,
+            "standard": profile.name,
+            "sheet_size": profile.sheet.name,
+            "projection": profile.projection,
+            "steps": steps,
+        }
 
         def failed(error: str) -> AdapterResult[dict[str, Any]]:
             return AdapterResult(
@@ -1274,9 +1437,12 @@ class SolidWorksDrawingStandardMixin:
             title=title or stem,
             subtitle=subtitle,
             author=author,
-            drawn_date=drawn_date or _date.today().strftime("%d %b %Y"),
+            drawn_date=drawn_date or _date.today().strftime(profile.date_format),
             revision=rev,
             company=company,
+            profile=profile,
+            names=names,
+            designation=number,
         )
         if write_model_properties:
             for name, value in model_props.items():
@@ -1290,11 +1456,11 @@ class SolidWorksDrawingStandardMixin:
 
         # 2. A drawing on the A3 ISO format, without the Sheet Format/Size prompt.
         found = self._handle_com_operation(
-            "standard_drawing_format", lambda: find_sheet_format(self)
+            "standard_drawing_format", lambda: find_sheet_format(self, format_name)
         )
         if not (found.is_success and found.data):
             return failed(
-                "Sheet format 'a3 - iso.slddrt' not found in SolidWorks' sheet "
+                f"Sheet format '{format_name}' not found in SolidWorks' sheet "
                 "format folders or under C:\\ProgramData\\SOLIDWORKS"
             )
         prompt = self._handle_com_operation(
@@ -1312,11 +1478,21 @@ class SolidWorksDrawingStandardMixin:
         if not created.is_success:
             return failed(f"Could not create drawing: {created.error}")
         _step(steps, "drawing_units_mm", await self.set_units("mm"))
+        if drafting_standard_file:
+            loaded = self._handle_com_operation(
+                "standard_drawing_drafting_standard",
+                lambda: self._load_drafting_standard(drafting_standard_file),
+            )
+            _step(steps, "drafting_standard", loaded)
+            if not loaded.is_success:
+                return failed(f"Could not load the drafting standard: {loaded.error}")
 
         # 3. The sheet, one COM step at a time.
         s = _Sheet(
             path=path,
             sheet_format=str(found.data),
+            profile=profile,
+            names=names,
             include_isometric=include_isometric,
             material=material,
             extra_notes=list(notes or []),
@@ -1327,7 +1503,7 @@ class SolidWorksDrawingStandardMixin:
             ),
         )
         for name, build in (
-            ("sheet", self._setup_a3_sheet),
+            ("sheet", self._setup_sheet),
             ("views", self._create_views),
             ("layout", self._fit_views),
             ("dimensions", self._dimension_views),

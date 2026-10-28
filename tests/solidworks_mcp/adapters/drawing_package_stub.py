@@ -21,6 +21,11 @@ PACKAGE_ARGS = (
     False,
     False,
     3.0,
+    "ESKD",
+    "A2",
+    "C:/formats/frame.slddrt",
+    "C:/standards/MyStandard.sldstd",
+    {"title": "Name"},
 )
 
 

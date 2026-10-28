@@ -1805,8 +1805,13 @@ class SolidWorksAdapter(ABC):
         include_isometric: bool = True,
         write_model_properties: bool = True,
         title_block_text_height_mm: float | None = None,
+        standard: str = "ISO",
+        sheet_size: str = "A3",
+        sheet_format: str | None = None,
+        drafting_standard_file: str | None = None,
+        title_block_fields: dict[str, str] | None = None,
     ) -> AdapterResult[dict[str, Any]]:
-        """Create a complete standard A3 drawing.
+        """Create a complete drawing that follows a drafting standard (ISO or ESKD).
 
         Returns:
             AdapterResult[dict[str, Any]]: Error unless the adapter implements it.
