@@ -969,6 +969,8 @@ class SolidWorksDrawingStandardMixin:
             True,
         ):
             raise RuntimeError(f"SetupSheet5 refused the sheet format {s.sheet_format}")
+        # SetupSheet5 asks for a rebuild so the projection method takes effect.
+        self._attempt(lambda: model.ForceRebuild3(True), default=None)
         self._attempt(
             lambda: model.SetUserPreferenceIntegerValue(
                 _SW_DETAILING_DIM_TRAILING_ZERO, _SW_DIM_REMOVE_TRAILING_ZEROES

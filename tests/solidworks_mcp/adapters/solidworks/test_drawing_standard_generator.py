@@ -290,6 +290,10 @@ class _Drawing:
     def EditRebuild3(self):  # noqa: N802
         return True
 
+    def ForceRebuild3(self, top_only):  # noqa: N802
+        self.force_rebuilt = top_only
+        return True
+
 
 class _App:
     def __init__(self, folder: str, open_doc: Any = None) -> None:
@@ -614,6 +618,7 @@ async def test_the_sheet_and_views_follow_the_standard(files) -> None:
 
     assert drawing.setup[1:3] == (std.ISO_A3.sheet.paper, std._SW_TEMPLATE_CUSTOM)
     assert drawing.setup[7:9] == std.SHEET_SIZE
+    assert drawing.force_rebuilt is True  # SetupSheet5 asks for a rebuild
     assert drawing.preferences == {
         std._SW_DETAILING_DIM_TRAILING_ZERO: std._SW_DIM_REMOVE_TRAILING_ZEROES
     }
