@@ -224,6 +224,7 @@ class _Drawing:
         self.editing = "sheet"
         self.loaded_standard: str | None = None
         self.loads_standard = True
+        self.bounds: Any = None  # the sheet size read back; None = unreadable
 
     def EditTemplate(self):  # noqa: N802
         self.editing = "format"
@@ -347,6 +348,9 @@ class _Harness(std.SolidWorksDrawingStandardMixin):
     def _result(self, name: str, *args: Any) -> AdapterResult[Any]:
         self.calls.append((name, *args))
         return self.results.get(name, OK)
+
+    def _sheet_bounds(self, drawing):
+        return getattr(drawing, "bounds", None)
 
     def _dimension_geometry(self, an, _key, _view):
         if self.results.get("unmeasurable"):
@@ -1237,3 +1241,35 @@ async def test_iso_is_still_the_default_standard(files) -> None:
     assert result.data["projection"] == "third_angle"
     assert drawing.setup[5] is False
     assert drawing.setup[6].endswith("a3 - iso.slddrt")
+
+
+@pytest.mark.asyncio
+async def test_a_sheet_format_of_the_right_size_is_confirmed(eskd_files) -> None:
+    drawing = _Drawing(format_notes=_eskd_title_block())
+    drawing.bounds = (0.0, 0.0, 0.4205, 0.297)  # within 2 mm of A3
+    adapter = _adapter(eskd_files, drawing)
+
+    result = await adapter.create_standard_drawing(eskd_files.part, **_eskd(eskd_files))
+
+    assert result.is_success, result.error
+    assert (
+        next(s for s in result.data["steps"] if s["step"] == "build_sheet")["status"]
+        == "success"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_sheet_format_of_another_size_stops_the_build(eskd_files) -> None:
+    drawing = _Drawing(format_notes=_eskd_title_block())
+    drawing.bounds = (0.0, 0.0, 0.210, 0.297)  # an A4 format asked for as A3
+    adapter = _adapter(eskd_files, drawing)
+
+    result = await adapter.create_standard_drawing(eskd_files.part, **_eskd(eskd_files))
+
+    assert not result.is_success
+    assert "makes a 210 x 297 mm sheet" in result.error
+    assert "ESKD A3 is 420 x 297 mm" in result.error
+    assert "change sheet_size" in result.error
+    assert "views" not in [
+        s["step"].removeprefix("build_") for s in result.data["steps"]
+    ]

@@ -326,6 +326,9 @@ MAX_NOTE_LINES = 7
 #: default drawing number ran across the size box at the format's height).
 TITLE_BLOCK_FIELDS = {"SW-File Name": "drawing number", "Description": "title"}
 
+#: A sheet format may differ from the profile's paper size by this much (m).
+SHEET_SIZE_TOLERANCE = 0.002
+
 #: A fitted field's text is never made smaller than this.
 MIN_FIELD_HEIGHT = 0.002
 
@@ -971,13 +974,31 @@ class SolidWorksDrawingStandardMixin:
             raise RuntimeError(f"SetupSheet5 refused the sheet format {s.sheet_format}")
         # SetupSheet5 asks for a rebuild so the projection method takes effect.
         self._attempt(lambda: model.ForceRebuild3(True), default=None)
+        # With a custom sheet format SolidWorks ignores the paper size and
+        # takes the sheet's size from the format, so read it back.
+        bounds = self._sheet_bounds(drawing)
+        if bounds is not None:
+            got = (bounds[2], bounds[3])
+            want = (s.profile.sheet.width, s.profile.sheet.height)
+            if max(abs(got[0] - want[0]), abs(got[1] - want[1])) > SHEET_SIZE_TOLERANCE:
+                raise RuntimeError(
+                    f"The sheet format {os.path.basename(s.sheet_format)} makes a "
+                    f"{got[0] * 1000:.0f} x {got[1] * 1000:.0f} mm sheet, but "
+                    f"{s.profile.name} {s.profile.sheet.name} is "
+                    f"{want[0] * 1000:.0f} x {want[1] * 1000:.0f} mm. Use a "
+                    "sheet format of that size, or change sheet_size."
+                )
         self._attempt(
             lambda: model.SetUserPreferenceIntegerValue(
                 _SW_DETAILING_DIM_TRAILING_ZERO, _SW_DIM_REMOVE_TRAILING_ZEROES
             ),
             default=None,
         )
-        return {"sheet": sheet_name, "sheet_format": s.sheet_format}
+        return {
+            "sheet": sheet_name,
+            "sheet_format": s.sheet_format,
+            "size_checked": bounds is not None,
+        }
 
     def _create_views(self, s: _Sheet) -> dict[str, Any]:
         """Create the profile's orthographic views, name their roles, add the isometric.
