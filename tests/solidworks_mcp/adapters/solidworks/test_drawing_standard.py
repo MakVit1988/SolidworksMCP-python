@@ -119,6 +119,10 @@ class TestSheetMaths:
 ESKD = std.get_profile("ESKD", "A3")
 
 
+def _run(operation, default=None):
+    return operation()
+
+
 class TestEskdSheetMaths:
     PLATE = {"front": (0.12, 0.01), "plan": (0.12, 0.07), "side": (0.07, 0.01)}
 
@@ -261,6 +265,29 @@ class TestSheetFormatPath:
         fmt = tmp_path / "Frame.slddrt"
         fmt.write_bytes(b"")
         assert std.find_sheet_format(SimpleNamespace(), str(fmt)) == str(fmt)
+
+    def test_cyrillic_look_alikes_and_case_are_ignored(self, tmp_path) -> None:
+        # The file is named with Cyrillic А and Р; the request uses Latin letters.
+        real = tmp_path / "A3-\u0410-1.slddrt"
+        real.write_bytes(b"")
+        other = tmp_path / "A4-\u0420-1.slddrt"
+        other.write_bytes(b"")
+        app = SimpleNamespace(GetUserPreferenceStringValue=lambda _p: str(tmp_path))
+
+        found = std.find_sheet_format(
+            SimpleNamespace(swApp=app, _attempt=_run), "a3-a-1.SLDDRT"
+        )
+        assert found == str(real)
+        assert std.find_sheet_format(
+            SimpleNamespace(swApp=app, _attempt=_run), "A4-P-1.slddrt"
+        ) == str(other)
+
+    def test_an_unreadable_folder_is_skipped(self, tmp_path) -> None:
+        app = SimpleNamespace(
+            GetUserPreferenceStringValue=lambda _p: str(tmp_path / "missing")
+        )
+        adapter = SimpleNamespace(swApp=app, _attempt=_run)
+        assert std.find_sheet_format(adapter, "A3-A-1.slddrt") is None
 
     def test_a_full_path_that_does_not_exist_is_not_found(self, tmp_path) -> None:
         missing = str(tmp_path / "nope.slddrt")

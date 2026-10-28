@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no captions on views in projection relation, and a "Технические требования"
   block.
 - **New arguments**: `standard`, `sheet_size`, `sheet_format` (a `.slddrt`
-  path or file name; required for ЕСКД, which has no default),
+  path or file name; ЕСКД defaults to SolidWorks' Russian form 1 format for
+  the size, `A3-A-1.slddrt`, or `A4-P-1.slddrt` for A4),
   `drafting_standard_file` (a `.sldstd` loaded into the drawing through
   `IModelDocExtension.LoadDraftingStandard`) and `title_block_fields` (maps
   the logical fields title, designation, material, mass, author, date,

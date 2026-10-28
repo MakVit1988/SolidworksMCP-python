@@ -93,7 +93,8 @@ class DrawingProfile:
         material_in_notes: Whether the material is the first note line.
         uppercase_notes: Whether note lines are shown in capitals.
         sheet_format_name: Default sheet format file, or ``""`` when the
-            caller must name one.
+            caller must name one. ЕСКД follows SolidWorks' Russian formats:
+            ``A3-A-1.slddrt`` is A3, landscape (А), form 1 (first sheet).
         property_names: Logical field -> SolidWorks custom property name.
         date_format: ``strftime`` pattern for the drawn date.
         revision_in_number: Whether the default drawing number carries the
@@ -252,6 +253,17 @@ ESKD_SHEETS: dict[str, SheetSpec] = {
 }
 
 
+def eskd_format_name(sheet: SheetSpec) -> str:
+    """The Russian sheet format for a paper size, form 1: ``A3-A-1.slddrt``.
+
+    SolidWorks' Russian ``sheetformat`` folder names its formats
+    ``<size>-<А|P>-<form>.slddrt``: А is landscape, P portrait (A4 is only
+    portrait), form 1 is the first sheet's title block.
+    """
+    orientation = "A" if sheet.width > sheet.height else "P"
+    return f"{sheet.name}-{orientation}-1.slddrt"
+
+
 def _eskd(sheet: SheetSpec) -> DrawingProfile:
     """The ЕСКД profile for one paper size (form 1 title block, ГОСТ 2.104)."""
     w, h = sheet.width, sheet.height
@@ -290,7 +302,7 @@ def _eskd(sheet: SheetSpec) -> DrawingProfile:
         standard_notes=ESKD_STANDARD_NOTES,
         material_in_notes=False,
         uppercase_notes=False,
-        sheet_format_name="",
+        sheet_format_name=eskd_format_name(sheet),
         property_names=ESKD_PROPERTY_NAMES,
         date_format="%d.%m.%Y",
         revision_in_number=False,

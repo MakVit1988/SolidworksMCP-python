@@ -132,7 +132,6 @@ async def test_standard_drawing_eskd(tmp_path) -> None:
     [
         ({"standard": "DIN"}, "Unknown drawing standard"),
         ({"standard": "ESKD", "sheet_size": "B5"}, "not available for ESKD"),
-        ({"standard": "ESKD"}, "no default sheet format"),
         ({"title_block_fields": {"x": "y"}}, "Unknown title-block field"),
         ({"drafting_standard_file": "C:/no/such.sldstd"}, "not found"),
     ],

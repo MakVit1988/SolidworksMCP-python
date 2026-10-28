@@ -3862,14 +3862,6 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             merge_property_names(profile, title_block_fields)
         except ValueError as exc:
             return AdapterResult(status=AdapterResultStatus.ERROR, error=str(exc))
-        if not (sheet_format or profile.sheet_format_name):
-            return AdapterResult(
-                status=AdapterResultStatus.ERROR,
-                error=(
-                    f"The {profile.name} profile has no default sheet format; "
-                    "pass sheet_format"
-                ),
-            )
         if drafting_standard_file and not os.path.isfile(drafting_standard_file):
             return AdapterResult(
                 status=AdapterResultStatus.ERROR,

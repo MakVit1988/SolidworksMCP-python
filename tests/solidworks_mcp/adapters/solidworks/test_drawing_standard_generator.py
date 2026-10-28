@@ -973,6 +973,7 @@ def eskd_files(files, tmp_path):
     """``files`` plus a sheet format and a drafting standard on disk."""
     frame = tmp_path / "formats" / "Frame A3 form1.slddrt"
     frame.write_bytes(b"")
+    (tmp_path / "formats" / "A3-A-1.slddrt").write_bytes(b"")
     standard = tmp_path / "MyStandard.sldstd"
     standard.write_bytes(b"")
     files.frame = str(frame)
@@ -1114,16 +1115,28 @@ async def test_eskd_title_block_fields_can_be_renamed(eskd_files) -> None:
 
 
 @pytest.mark.asyncio
-async def test_eskd_needs_a_sheet_format(eskd_files) -> None:
+async def test_eskd_uses_the_russian_form_1_format_for_the_size(eskd_files) -> None:
+    drawing = _Drawing(format_notes=_eskd_title_block())
+    adapter = _adapter(eskd_files, drawing)
+
+    result = await adapter.create_standard_drawing(
+        eskd_files.part, standard="ESKD", output_dir=str(eskd_files.out)
+    )
+
+    assert result.is_success, result.error
+    assert drawing.setup[6] == os.path.join(eskd_files.formats, "A3-A-1.slddrt")
+
+
+@pytest.mark.asyncio
+async def test_a_missing_default_format_is_named(eskd_files) -> None:
     adapter = _adapter(eskd_files)
 
     result = await adapter.create_standard_drawing(
-        eskd_files.part, standard="ESKD", sheet_size="A3"
+        eskd_files.part, standard="ESKD", sheet_size="A2"
     )
 
     assert not result.is_success
-    assert "no default sheet format" in result.error
-    assert "sheet_format" in result.error
+    assert "Sheet format 'A2-A-1.slddrt' not found" in result.error
 
 
 @pytest.mark.asyncio

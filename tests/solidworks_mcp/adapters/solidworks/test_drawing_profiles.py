@@ -82,9 +82,24 @@ class TestEskdSheets:
         assert p.captions == {} and p.caption_strip == 0
         assert p.notes_heading == "Технические требования"
         assert not p.material_in_notes and not p.uppercase_notes
-        assert p.sheet_format_name == ""
+        assert p.sheet_format_name == "A3-A-1.slddrt"
         assert p.date_format == "%d.%m.%Y"
         assert not p.revision_in_number
+
+
+class TestEskdSheetFormatNames:
+    @pytest.mark.parametrize(
+        ("size", "name"),
+        [
+            ("A4", "A4-P-1.slddrt"),  # A4 is portrait only
+            ("A3", "A3-A-1.slddrt"),
+            ("A2", "A2-A-1.slddrt"),
+            ("A1", "A1-A-1.slddrt"),
+            ("A0", "A0-A-1.slddrt"),
+        ],
+    )
+    def test_form_1_format_per_size(self, size, name) -> None:
+        assert prof.ESKD_PROFILES[size].sheet_format_name == name
 
 
 class TestIsoProfile:

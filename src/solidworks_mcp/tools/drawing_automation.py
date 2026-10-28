@@ -162,8 +162,9 @@ class GenerateDrawingPackageInput(CompatInput):
     sheet_format: str | None = Field(
         default=None,
         description="Sheet format (.slddrt) with the title block: a full path, "
-        "or a file name from SolidWorks' sheet format folders. ISO defaults "
-        "to 'a3 - iso.slddrt'; ESKD needs one.",
+        "or a file name from SolidWorks' sheet format folders. Defaults: ISO "
+        "'a3 - iso.slddrt'; ESKD the Russian form 1 format for the size, "
+        "e.g. 'A3-A-1.slddrt' (A4: 'A4-P-1.slddrt').",
     )
     drafting_standard_file: str | None = Field(
         default=None,
@@ -401,8 +402,10 @@ async def register_drawing_automation_tools(
         view-name captions and a NOTES block. ``ESKD`` (ЕСКД) is A4-A0, first-
         angle projection (plan below the front, left view to its right), the
         ГОСТ 2.302 scale series, no captions on views in projection relation,
-        and a "Технические требования" block. ESKD needs ``sheet_format``: the
-        ``.slddrt`` that carries the ГОСТ 2.104 title block. If its title-block
+        and a "Технические требования" block. The title block comes from the sheet
+        format: by default SolidWorks' Russian form 1 format for the size
+        (``A3-A-1.slddrt``, ``A4-P-1.slddrt``); pass ``sheet_format`` for another.
+        If its title-block
         fields read other custom properties than the defaults (Наименование,
         Обозначение, Материал, Масса, Разработал, Дата, Организация), name
         them in ``title_block_fields``. ``drafting_standard_file`` loads a

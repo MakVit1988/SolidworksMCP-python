@@ -288,11 +288,21 @@ def title_block_properties(
     return model_props, drawing_props
 
 
+#: Cyrillic letters that look like Latin ones; file names mix them freely.
+_LOOKALIKES = str.maketrans("АВЕКМНОРСТХ", "ABEKMHOPCTX")
+
+
+def _fold(name: str) -> str:
+    """A file name in a form that ignores case and Cyrillic look-alike letters."""
+    return name.upper().translate(_LOOKALIKES)
+
+
 def find_sheet_format(adapter: Any, name: str = "a3 - iso.slddrt") -> str | None:
     """Locate a sheet format file: SolidWorks' configured folder, then ProgramData.
 
     ``name`` may also be the full path of a ``.slddrt``, which is used as given
-    when the file exists.
+    when the file exists. A name that matches no file exactly is compared
+    ignoring case and Cyrillic look-alike letters (``А3-А-1`` is ``A3-A-1``).
     """
     if os.path.isabs(name) or ntpath.isabs(name):
         return name if os.path.isfile(name) else None
@@ -314,6 +324,15 @@ def find_sheet_format(adapter: Any, name: str = "a3 - iso.slddrt") -> str | None
         candidate = os.path.join(folder, name)
         if os.path.isfile(candidate):
             return candidate
+    wanted = _fold(name)
+    for folder in folders:
+        try:
+            entries = os.listdir(folder)
+        except OSError:
+            continue
+        match = next((e for e in sorted(entries) if _fold(e) == wanted), None)
+        if match is not None:
+            return os.path.join(folder, match)
     return None
 
 
@@ -1369,8 +1388,8 @@ class SolidWorksDrawingStandardMixin:
             sheet_size: ``A3`` for ISO; ``A4``-``A0`` for ESKD.
             sheet_format: The ``.slddrt`` to use: a full path, or a file name
                 looked up in SolidWorks' sheet format folders. ISO defaults to
-                ``a3 - iso.slddrt``; ESKD has no default and needs one (the
-                title block comes from it).
+                ``a3 - iso.slddrt``; ESKD to SolidWorks' Russian form 1 format
+                for the paper size (``A3-A-1.slddrt``; A4 is ``A4-P-1``).
             drafting_standard_file: A ``.sldstd`` file to load into the new
                 drawing (fonts, arrows, line styles) before it is built.
             title_block_fields: Logical field -> the property name the sheet
@@ -1390,16 +1409,6 @@ class SolidWorksDrawingStandardMixin:
         except ValueError as exc:
             return AdapterResult(status=AdapterResultStatus.ERROR, error=str(exc))
         format_name = sheet_format or profile.sheet_format_name
-        if not format_name:
-            return AdapterResult(
-                status=AdapterResultStatus.ERROR,
-                error=(
-                    f"The {profile.name} profile has no default sheet format; "
-                    "pass sheet_format (the .slddrt with its title block, as "
-                    "a full path or a file name from SolidWorks' sheet format "
-                    "folders)"
-                ),
-            )
         if drafting_standard_file and not os.path.isfile(drafting_standard_file):
             return AdapterResult(
                 status=AdapterResultStatus.ERROR,
